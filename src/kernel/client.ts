@@ -10,9 +10,8 @@ type Evaluated = Extract<KernelResponse, { kind: "evaluated" }>;
 export class KernelClient {
   private worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
   private seq = 0;
-  private latestEval = 0;
   private inFlight = false;
-  private queued: { doc: Document; stopBefore?: string } | null = null;
+  private queued: { doc: Document; stopBefore?: string; preview?: boolean } | null = null;
   private pendingExports = new Map<number, (r: Extract<KernelResponse, { kind: "exported" }>) => void>();
 
   onReady: () => void = () => {};
@@ -31,12 +30,14 @@ export class KernelClient {
           break;
         case "evaluated":
           this.inFlight = false;
+          // Show every completed result (it's the newest one finished: only one runs at a
+          // time), then start the newest queued request. Dropping results while a newer
+          // one waits would hide all intermediate frames of a drag.
+          this.onEvaluated(msg);
           if (this.queued) {
             const q = this.queued;
             this.queued = null;
-            this.dispatch(q.doc, q.stopBefore);
-          } else if (msg.seq === this.latestEval) {
-            this.onEvaluated(msg);
+            this.dispatch(q.doc, q.stopBefore, q.preview);
           }
           break;
         case "exported":
@@ -47,19 +48,19 @@ export class KernelClient {
     };
   }
 
-  evaluate(doc: Document, stopBefore?: string) {
+  /** `preview`: coarse, fast result while dragging; a final full evaluation follows. */
+  evaluate(doc: Document, stopBefore?: string, preview = false) {
     if (this.inFlight) {
-      this.queued = { doc, stopBefore };
+      this.queued = { doc, stopBefore, preview };
       return;
     }
-    this.dispatch(doc, stopBefore);
+    this.dispatch(doc, stopBefore, preview);
   }
 
-  private dispatch(doc: Document, stopBefore?: string) {
+  private dispatch(doc: Document, stopBefore?: string, preview = false) {
     const seq = ++this.seq;
-    this.latestEval = seq;
     this.inFlight = true;
-    this.send({ kind: "evaluate", seq, doc, stopBefore });
+    this.send({ kind: "evaluate", seq, doc, stopBefore, preview });
   }
 
   exportSTEP(doc: Document): Promise<Blob> {

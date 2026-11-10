@@ -67,8 +67,8 @@ Type-specific fields:
 - **sketch**: `plane` (`"XY"`, `"XZ"`, `"YZ"`), optional `face` (persistent name of a planar face; when set, `plane` is ignored), `offset` (number, along the plane normal), `sketch` (see below).
 - **extrude**: `sketchId` (an earlier sketch), `distance` (may be negative), `op`.
 - **revolve**: `sketchId`, `axis` (`"X"`, `"Y"`, `"Z"`), `angle` (degrees), `op`.
-- **fillet / chamfer**: `size` (radius or distance), `edges` (list of persistent edge names; empty means every edge).
-- **pushpull**: `face` (persistent name of a planar face), `distance` (positive adds material, negative removes it).
+- **fillet / chamfer**: `size` (radius or distance), `edges` (list of persistent edge names; empty means every edge), optional `overrides` (edge name → size for edges that differ from `size`).
+- **pushpull**: `face` (persistent name of a planar face), `distance` (positive adds material, negative removes it). The face is moved: walls stretch and fillets or holes on it travel along; when the shape around the face doesn't allow that, the face is extruded instead.
 - **shell**: `faces` (persistent names of faces to open), `thickness` (inward).
 - **mirror**: `plane` (`"XY"`, `"XZ"`, `"YZ"`), `offset`. The mirrored copy is joined to the body.
 - **pattern**: `mode` (`"linear"` or `"circular"`), `axis` (`"X"`, `"Y"`, `"Z"`), `count` (instances including the original), `spacing` (linear, mm), `angle` (circular, degrees; 360 spreads evenly). Copies are joined.

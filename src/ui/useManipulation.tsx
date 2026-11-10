@@ -5,11 +5,12 @@
 // parametric and undoable: the handle is just a faster way to set a number.
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import * as THREE from "three";
 import type { Scope } from "../expr/expr";
 import { makeEdgeTreatment, makePushPull, makeShell, newId, updateFeature } from "../model/doc";
 import type { Vec3 } from "../model/frame";
 import type { BodyId, Document, EdgeTreatmentFeature, Feature, MeshData, PushPullFeature, TransformFeature } from "../model/types";
-import { bodyBounds, edgeAnchor, faceAnchor } from "../viewport/meshGeom";
+import { bodyBounds, edgeAnchor, edgeFrame, faceAnchor } from "../viewport/meshGeom";
 import type { DragPhase, Handle, Overlay } from "../viewport/Viewport";
 import { ExprInput } from "./ExprInput";
 
@@ -42,6 +43,37 @@ interface Drag {
   base: number;
   value: number;
   anchor: Vec3;
+  /** Handle direction at drag start (the face it was on may be replaced by the preview). */
+  dir: Vec3;
+  /** Mesh shown when the drag started: source for client-side previews. */
+  startMesh: MeshData;
+  /** Transform value at drag start, to compute the rigid delta. */
+  startTransform?: TransformFeature;
+  /** Edge whose radius a "refillet" drag changes. */
+  edge?: string;
+}
+
+export interface RigidPreview {
+  body: BodyId;
+  /** Column-major 4x4, applied to the body's current mesh. */
+  matrix: number[];
+}
+
+export interface GhostPreview {
+  mesh: MeshData;
+  face: string;
+  distance: number;
+}
+
+/** World matrix of a transform feature: rotate about the pivot, then translate. */
+export function transformMatrix(t: TransformFeature): THREE.Matrix4 {
+  const axis = new THREE.Vector3(t.axis === "X" ? 1 : 0, t.axis === "Y" ? 1 : 0, t.axis === "Z" ? 1 : 0);
+  const pivot = new THREE.Vector3(t.pivotX, t.pivotY, t.pivotZ);
+  return new THREE.Matrix4()
+    .makeTranslation(t.dx, t.dy, t.dz)
+    .multiply(new THREE.Matrix4().makeTranslation(pivot.x, pivot.y, pivot.z))
+    .multiply(new THREE.Matrix4().makeRotationAxis(axis, (t.angle * Math.PI) / 180))
+    .multiply(new THREE.Matrix4().makeTranslation(-pivot.x, -pivot.y, -pivot.z));
 }
 
 /** 1 mm steps, 5° for rotations. */
@@ -61,13 +93,36 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
   // Selection entries that no longer exist in the mesh are ignored.
   const faceIndex = useMemo(() => new Map((mesh?.faceNames ?? []).map((n, i) => [n, i])), [mesh]);
   const edgeSet = useMemo(() => new Set(mesh?.edgeNames ?? []), [mesh]);
+  // Blend faces are numbered by position ("…]#2"); after a radius change the number can
+  // move, so a selected blend is matched again by its edge.
+  const relocate = (n: string) => {
+    if (faceIndex.has(n)) return n;
+    const base = n.replace(/\]#\d+$/, "]");
+    if (base === n && !/:blend:/.test(n)) return null;
+    return mesh?.faceNames.find((x) => x.replace(/\]#\d+$/, "]") === base) ?? null;
+  };
   const live: Selection = {
-    faces: selection.faces.filter((n) => faceIndex.has(n)),
+    faces: selection.faces.map(relocate).filter((n): n is string => !!n),
     edges: selection.edges.filter((n) => edgeSet.has(n)),
     body: selection.body && mesh?.faceBody.includes(selection.body) ? selection.body : null,
   };
   const planar = (n: string) => !!mesh && mesh.facePlanar[faceIndex.get(n) ?? -1];
   const singlePlanarFace = live.faces.length === 1 && planar(live.faces[0]) ? live.faces[0] : null;
+
+  // A selected fillet/chamfer face: its feature and the edge it rounds.
+  const blend = useMemo(() => {
+    if (live.faces.length !== 1) return null;
+    const m = /^((?:fi|ch)-[^:]+):blend:(.+)$/.exec(live.faces[0]);
+    if (!m) return null;
+    const feature = doc.features.find((f): f is EdgeTreatmentFeature => f.id === m[1] && (f.type === "fillet" || f.type === "chamfer"));
+    if (!feature) return null;
+    // "#k" after the edge name numbers blend faces by position and can change when the
+    // radius does: key overrides by the edge without it (the kernel accepts both).
+    const raw = m[2];
+    const stripped = raw.replace(/\]#\d+$/, "]");
+    const edge = feature.overrides && raw in feature.overrides ? raw : stripped;
+    return { feature, edge, face: live.faces[0] };
+  }, [live.faces.join(","), doc]);
 
   useEffect(() => {
     if (!enabled) {
@@ -107,9 +162,23 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
   const activePushPull = active?.type === "pushpull" ? active : null;
   const activeTransform = active?.type === "transform" ? active : null;
 
+  // Moving/rotating a body is previewed in the viewport (no kernel round trip).
+  const rigid = useMemo<RigidPreview | null>(() => {
+    if (!drag || drag.feature.type !== "transform") return null;
+    const now = transformMatrix(drag.feature);
+    const start = transformMatrix(drag.startTransform!);
+    return { body: drag.feature.body, matrix: now.multiply(start.invert()).elements.slice() };
+  }, [drag]);
+
+  const ghost = useMemo<GhostPreview | null>(() => {
+    if (!drag || drag.handle !== "pushpull" || drag.value === 0) return null;
+    const f = drag.feature as PushPullFeature;
+    return { mesh: drag.startMesh, face: drag.isNew ? f.face : `${f.id}:end`, distance: drag.value };
+  }, [drag]);
+
   const handles = useMemo<Handle[]>(() => {
     if (!enabled || !mesh) return [];
-    if (drag) return dragHandles(drag, mesh);
+    if (drag) return dragHandles(drag, rigid);
     if (activePushPull) {
       const a = faceAnchor(mesh, `${activePushPull.id}:end`);
       return a ? [{ id: "pushpull", kind: "arrow", origin: a.p, dir: a.n, color: 0x4f8cff }] : [];
@@ -118,9 +187,15 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
       const a = faceAnchor(mesh, singlePlanarFace);
       return a ? [{ id: "pushpull", kind: "arrow", origin: a.p, dir: a.n, color: 0x4f8cff }] : [];
     }
+    if (blend) {
+      const a = faceAnchor(mesh, blend.face);
+      const dir = blendDirection(mesh, blend.edge, a?.n);
+      return a && dir ? [{ id: "refillet", kind: "arrow", origin: a.p, dir, color: 0xff6b93 }] : [];
+    }
     if (live.edges.length) {
       const a = edgeAnchor(mesh, live.edges[0]);
-      return a ? [{ id: "fillet", kind: "arrow", origin: a.p, dir: a.inward, color: 0xff6b93 }] : [];
+      const fr = edgeFrame(mesh, live.edges[0]);
+      return a ? [{ id: "fillet", kind: "arrow", origin: a.p, dir: fr?.along ?? a.inward, color: 0xff6b93 }] : [];
     }
     if (live.body) {
       const b = bodyBounds(mesh, live.body);
@@ -128,7 +203,7 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     }
     return [];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, mesh, drag?.handle, activePushPull?.id, singlePlanarFace, live.edges.join(","), live.body]);
+  }, [enabled, mesh, drag?.handle, rigid, activePushPull?.id, singlePlanarFace, blend?.face, live.edges.join(","), live.body]);
 
   const onHandleDrag = (id: string, raw: number, phase: DragPhase) => {
     if (!mesh) return;
@@ -136,7 +211,8 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     if (!drag) return;
     if (phase === "move") {
       // Fillets grow slower than the pointer (half the travel, 0.5 mm steps) for finer control.
-      const value = id === "rotate" ? snap(raw, 5) : id === "fillet" ? snap(raw / 2, 0.5) : snap(raw, 1);
+      // Fillet handles slide on a face: the travel is the radius (0.5 mm steps).
+      const value = id === "rotate" ? snap(raw, 5) : id === "fillet" || id === "refillet" ? snap(raw, 0.5) : snap(raw, 1);
       if (value === drag.value) return;
       setDrag({ ...drag, value, feature: applyValue(drag, value) });
       return;
@@ -147,6 +223,7 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     if (d.value === 0 && d.isNew) return; // a click on the handle, nothing to do
     const f = applyValue(d, d.value);
     commit(d.isNew ? { ...doc, features: [...doc.features, f] } : updateFeature(doc, f.id, f));
+    if (d.handle === "refillet") return; // keep the blend face selected; its box edits this edge
     setActiveId(f.id);
     if (f.type === "pushpull") setSelection({ faces: [`${f.id}:end`], edges: [], body: null });
     else if (f.type === "fillet" || f.type === "chamfer") setSelection(EMPTY);
@@ -157,15 +234,22 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     if (id === "pushpull") {
       if (activePushPull) {
         const a = faceAnchor(mesh, `${activePushPull.id}:end`)!;
-        return { handle: id, feature: activePushPull, isNew: false, base: activePushPull.distance, value: 0, anchor: a.p };
+        return { handle: id, feature: activePushPull, isNew: false, base: activePushPull.distance, value: 0, anchor: a.p, dir: a.n, startMesh: mesh };
       }
       const a = faceAnchor(mesh, singlePlanarFace!)!;
-      return { handle: id, feature: makePushPull(doc, singlePlanarFace!, 0), isNew: true, base: 0, value: 0, anchor: a.p };
+      return { handle: id, feature: makePushPull(doc, singlePlanarFace!, 0), isNew: true, base: 0, value: 0, anchor: a.p, dir: a.n, startMesh: mesh };
+    }
+    if (id === "refillet" && blend) {
+      const a = faceAnchor(mesh, blend.face)!;
+      const f = blend.feature;
+      const dir = blendDirection(mesh, blend.edge, a.n) ?? [-a.n[0], -a.n[1], -a.n[2]];
+      return { handle: id, feature: f, isNew: false, base: overrideFor(f, blend.edge) ?? f.size, value: 0, anchor: a.p, dir, startMesh: mesh, edge: blend.edge };
     }
     if (id === "fillet") {
       const a = edgeAnchor(mesh, live.edges[0])!;
+      const fr = edgeFrame(mesh, live.edges[0]);
       const f: EdgeTreatmentFeature = { ...makeEdgeTreatment(doc, "fillet"), edges: live.edges, size: 0 };
-      return { handle: id, feature: f, isNew: true, base: 0, value: 0, anchor: a.p };
+      return { handle: id, feature: f, isNew: true, base: 0, value: 0, anchor: a.p, dir: fr?.along ?? a.inward, startMesh: mesh };
     }
     // Body gizmo: keep adjusting the transform we just made for this body.
     const b = bodyBounds(mesh, live.body!)!;
@@ -175,7 +259,7 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
         : { type: "transform", id: newId("tr"), name: `Move ${bodyName(live.body!)}`, suppressed: false, body: live.body!, dx: 0, dy: 0, dz: 0, axis: "Z", angle: 0, pivotX: b.center[0], pivotY: b.center[1], pivotZ: b.center[2] };
     const isNew = t !== activeTransform;
     const base = id === "move-x" ? t.dx : id === "move-y" ? t.dy : id === "move-z" ? t.dz : t.angle;
-    return { handle: id, feature: t, isNew, base, value: 0, anchor: b.center };
+    return { handle: id, feature: t, isNew, base, value: 0, anchor: b.center, dir: [0, 0, 1], startMesh: mesh, startTransform: t };
   }
 
   function applyValue(d: Drag, value: number): Feature {
@@ -186,6 +270,11 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
         return { ...(f as PushPullFeature), distance: v, exprs: undefined };
       case "fillet":
         return { ...(f as EdgeTreatmentFeature), size: Math.max(0.1, v), exprs: undefined };
+      case "refillet": {
+        const t = f as EdgeTreatmentFeature;
+        const edge = blendEdge(d);
+        return { ...t, overrides: { ...withoutVariants(t.overrides, edge), [edge]: Math.max(0.1, v) } };
+      }
       case "move-x":
         return { ...(f as TransformFeature), dx: v };
       case "move-y":
@@ -201,6 +290,7 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
   const previewDoc = useMemo<Document | null>(() => {
     if (!drag || (drag.value === 0 && drag.isNew)) return null;
     const f = drag.feature;
+    if (f.type === "transform") return null; // previewed in the viewport
     if ((f.type === "pushpull" && f.distance === 0) || ((f.type === "fillet" || f.type === "chamfer") && f.size <= 0)) return null;
     return drag.isNew ? { ...doc, features: [...doc.features, f] } : updateFeature(doc, f.id, f);
   }, [drag, doc]);
@@ -208,7 +298,11 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
   // ---- floating overlay ------------------------------------------------------------
   const overlay = useMemo<Overlay | null>(() => {
     if (!enabled || !mesh) return null;
-    if (drag) return { anchor: drag.anchor, content: <div className="ov-value live">{formatDrag(drag)}</div> };
+    if (drag) {
+      const h = dragHandles(drag, rigid)[0];
+      const anchor = h ? (h.kind === "arrow" ? h.origin : h.center) : drag.anchor;
+      return { anchor, content: <div className="ov-value live">{formatDrag(drag)}</div> };
+    }
 
     if (active) {
       const anchor = activeAnchor(active, mesh);
@@ -218,7 +312,25 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
 
     const buttons: ReactNode[] = [];
     let anchor: Vec3 | null = null;
-    if (live.faces.length) {
+    if (blend) {
+      anchor = faceAnchor(mesh, blend.face)?.p ?? null;
+      const f = blend.feature;
+      const current = overrideFor(f, blend.edge);
+      const setOverride = (v: number | undefined) => {
+        const overrides = withoutVariants(f.overrides, blend.edge);
+        if (v !== undefined) overrides[blend.edge] = v;
+        commit(updateFeature(doc, f.id, { overrides } as Partial<Feature>));
+      };
+      buttons.push(<strong key="t" className="ov-title">{f.name} · this edge</strong>);
+      buttons.push(
+        <label key="v" className="ov-field">
+          <span>{f.type === "fillet" ? "R" : "D"}</span>
+          <ExprInput value={current ?? f.size} scope={scope} min={0.01} onCommit={({ value }) => setOverride(value)} />
+        </label>,
+      );
+      if (current !== undefined) buttons.push(<button key="r" onClick={() => setOverride(undefined)} title={`Back to ${f.size} like the other edges`}>Reset</button>);
+      buttons.push(<span key="h" className="ov-hint">drag the arrow</span>);
+    } else if (live.faces.length) {
       anchor = faceAnchor(mesh, live.faces[0])?.p ?? null;
       if (singlePlanarFace) {
         buttons.push(<button key="sk" onClick={() => onSketchOnFace(singlePlanarFace)}>✎ Sketch</button>);
@@ -253,21 +365,51 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     }
     return anchor && buttons.length ? { anchor, content: <div className="ov-menu">{buttons}</div> } : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, mesh, drag, active, live.faces.join(","), live.edges.join(","), live.body, singlePlanarFace, doc, scope]);
+  }, [enabled, mesh, drag, rigid, active, blend, live.faces.join(","), live.edges.join(","), live.body, singlePlanarFace, doc, scope]);
 
-  return { selection: live, pickFace, pickEdge, pickBody, clear, handles, onHandleDrag, overlay, previewDoc, singlePlanarFace, activeId };
+  return { selection: live, pickFace, pickEdge, pickBody, clear, handles, onHandleDrag, overlay, previewDoc, rigid, ghost, singlePlanarFace, activeId };
+}
+
+const blendEdge = (d: Drag) => d.edge ?? "";
+
+/** Same edge, ignoring a trailing "#k" added to blend face names. */
+const sameEdge = (a: string, b: string) => a.replace(/\]#\d+$/, "]") === b.replace(/\]#\d+$/, "]");
+
+function overrideFor(f: EdgeTreatmentFeature, edge: string): number | undefined {
+  if (!f.overrides) return undefined;
+  if (edge in f.overrides) return f.overrides[edge];
+  const k = Object.keys(f.overrides).find((x) => sameEdge(x, edge));
+  return k ? f.overrides[k] : undefined;
+}
+
+/** Overrides without any key that refers to `edge`. */
+function withoutVariants(o: Record<string, number> | undefined, edge: string): Record<string, number> {
+  return Object.fromEntries(Object.entries(o ?? {}).filter(([k]) => !sameEdge(k, edge)));
+}
+
+/**
+ * Handle direction on a fillet face: along one of the faces it joins,
+ * perpendicular to the rounded edge. Falls back to the inward normal.
+ */
+function blendDirection(mesh: MeshData, edge: string, blendNormal?: Vec3): Vec3 | null {
+  const fr = edgeFrame(mesh, edge);
+  if (fr) return fr.along;
+  return blendNormal ? [-blendNormal[0], -blendNormal[1], -blendNormal[2]] : null;
 }
 
 const toggle = (list: string[], x: string) => (list.includes(x) ? list.filter((n) => n !== x) : [...list, x]);
 
-function dragHandles(d: Drag, mesh: MeshData): Handle[] {
-  // Keep showing the grabbed handle at its start position while previewing.
-  if (d.handle === "pushpull" || d.handle === "fillet") {
-    const f = d.feature;
-    const dir = f.type === "pushpull" ? faceAnchor(mesh, f.face)?.n : undefined;
-    return dir ? [{ id: d.handle, kind: "arrow", origin: d.anchor, dir, color: 0xffc53d }] : [];
+function dragHandles(d: Drag, rigid: RigidPreview | null): Handle[] {
+  if (d.handle === "pushpull" || d.handle === "fillet" || d.handle === "refillet") {
+    // The grabbed arrow follows the value along its direction.
+    const k = d.value;
+    const origin: Vec3 = [d.anchor[0] + d.dir[0] * k, d.anchor[1] + d.dir[1] * k, d.anchor[2] + d.dir[2] * k];
+    return [{ id: d.handle, kind: "arrow", origin, dir: d.dir, color: 0xffc53d }];
   }
-  return [];
+  // Body gizmo moves with the body.
+  const c = new THREE.Vector3(...d.anchor);
+  if (rigid) c.applyMatrix4(new THREE.Matrix4().fromArray(rigid.matrix));
+  return bodyGizmo([c.x, c.y, c.z]).map((h) => (h.id === d.handle ? { ...h, color: 0xffc53d } : h));
 }
 
 function bodyGizmo(c: Vec3): Handle[] {
@@ -285,6 +427,7 @@ function formatDrag(d: Drag): string {
     case "pushpull":
       return `${v > 0 ? "+" : ""}${v} mm`;
     case "fillet":
+    case "refillet":
       return `R ${Math.max(0.1, v)} mm`;
     case "rotate":
       return `${(((v + 540) % 360) - 180).toFixed(0)}°`;

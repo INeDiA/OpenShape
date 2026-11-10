@@ -167,7 +167,8 @@ export function App() {
   // While a handle is dragged the kernel previews the document with the change applied.
   const kernelDoc = manip.previewDoc ?? doc;
   useEffect(() => {
-    kernel.current?.evaluate(kernelDoc, rollbackId);
+    kernel.current?.evaluate(kernelDoc, rollbackId, !!manip.previewDoc);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kernelDoc, rollbackId]);
 
   useEffect(() => {
@@ -490,6 +491,8 @@ export function App() {
           handles={manip.handles}
           onHandleDrag={manip.onHandleDrag}
           overlay={manip.overlay}
+          rigidPreview={manip.rigid}
+          ghost={manip.ghost}
         />
         {editingSketch && (
           <SketchEditor

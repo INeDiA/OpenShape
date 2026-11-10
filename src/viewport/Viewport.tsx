@@ -44,6 +44,10 @@ interface Props {
   handles: Handle[];
   onHandleDrag: (id: string, value: number, phase: DragPhase) => void;
   overlay: Overlay | null;
+  /** Body drawn with an extra transform while it's being moved (no kernel round trip). */
+  rigidPreview: { body: string; matrix: number[] } | null;
+  /** Translucent prism showing a push/pull before the kernel result arrives. */
+  ghost: { mesh: MeshData; face: string; distance: number } | null;
 }
 
 const mat = (color: number) => new THREE.MeshStandardMaterial({ color, metalness: 0.1, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
@@ -56,6 +60,9 @@ const SKETCH = new THREE.LineBasicMaterial({ color: 0xff9f1a });
 const SKETCH_SEL = new THREE.LineBasicMaterial({ color: 0xff3d71 });
 const EDGE_SELECTED = new LineMaterial({ color: 0xff3d71, linewidth: 4, worldUnits: false });
 const EDGE_HOVER = new LineMaterial({ color: 0x4f8cff, linewidth: 4, worldUnits: false });
+const HIDDEN = new THREE.MeshBasicMaterial({ visible: false });
+const GHOST_ADD = new THREE.MeshBasicMaterial({ color: 0x4f8cff, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide });
+const GHOST_CUT = new THREE.MeshBasicMaterial({ color: 0xff3d71, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide });
 
 interface HandleObject {
   handle: Handle;
@@ -80,10 +87,15 @@ interface SceneState {
   hoveredHandle: string | null;
   selectedFaces: Set<string>;
   selectedBody: string | null;
+  /** Body hidden from the main mesh because a rigid preview draws it. */
+  hiddenBody: string | null;
+  rigid: { body: string; group: THREE.Group; others: THREE.LineSegments } | null;
+  ghost: THREE.Mesh | null;
+  dragging: boolean;
 }
 
 export function Viewport(props: Props) {
-  const { mesh, sketches, selectedSketchId, selectedEdges, selectedFaces, selectedBody, handles, overlay } = props;
+  const { mesh, sketches, selectedSketchId, selectedEdges, selectedFaces, selectedBody, handles, overlay, rigidPreview, ghost } = props;
   const host = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const state = useRef<SceneState | null>(null);
@@ -127,7 +139,7 @@ export function Viewport(props: Props) {
     const s: SceneState = {
       renderer, scene, camera, controls, model, overlay: overlayGroup, gizmos, handleObjects: [],
       body: null, edgeLines: null, mesh: null, hoveredFace: null, hoveredEdge: null, hoveredHandle: null,
-      selectedFaces: new Set(), selectedBody: null,
+      selectedFaces: new Set(), selectedBody: null, hiddenBody: null, rigid: null, ghost: null, dragging: false,
     };
     state.current = s;
 
@@ -162,9 +174,20 @@ export function Viewport(props: Props) {
     /** Index into mesh.edgeGroups of the edge under the cursor, if it's in front of the body. */
     const pickEdge = (): number | null => {
       if (!s.edgeLines || !s.mesh) return null;
+      const bodyHit = s.body ? ray.intersectObject(s.body)[0] : undefined;
+      // Pixel tolerance measured where the cursor actually is (not at the orbit target),
+      // and tighter over fillet faces so thin blends stay selectable.
+      const r = renderer.domElement.getBoundingClientRect();
+      const dist = bodyHit?.distance ?? camera.position.distanceTo(controls.target);
+      let px = 6;
+      if (bodyHit?.faceIndex != null) {
+        const idx = bodyHit.faceIndex * 3;
+        const fi = s.mesh.faceGroups.findIndex((g) => idx >= g.start && idx < g.start + g.count);
+        if (fi >= 0 && s.mesh.faceNames[fi].includes(":blend:")) px = 2;
+      }
+      ray.params.Line = { threshold: (dist * Math.tan((camera.fov * Math.PI) / 360) * 2 * px) / r.height };
       const hit = ray.intersectObject(s.edgeLines)[0];
       if (!hit || hit.index == null) return null;
-      const bodyHit = s.body ? ray.intersectObject(s.body)[0] : undefined;
       if (bodyHit && bodyHit.distance < hit.distance - 0.5) return null; // occluded
       const i = s.mesh.edgeGroups.findIndex((g) => hit.index! >= g.start && hit.index! < g.start + g.count);
       return i < 0 ? null : i;
@@ -250,8 +273,13 @@ export function Viewport(props: Props) {
       const t0 = handleValue(h.handle);
       if (t0 == null) return;
       drag = { h, t0, last: 0 };
+      s.dragging = true;
       controls.enabled = false;
-      renderer.domElement.setPointerCapture(ev.pointerId);
+      try {
+        renderer.domElement.setPointerCapture(ev.pointerId);
+      } catch {
+        /* synthetic or already-released pointer: dragging still works without capture */
+      }
       renderer.domElement.style.cursor = "grabbing";
       latest.current.onHandleDrag(h.handle.id, 0, "start");
     };
@@ -259,6 +287,7 @@ export function Viewport(props: Props) {
       if (drag) {
         const d = drag;
         drag = null;
+        s.dragging = false;
         controls.enabled = true;
         renderer.domElement.style.cursor = "grab";
         latest.current.onHandleDrag(d.h.handle.id, d.last, "end");
@@ -352,7 +381,7 @@ export function Viewport(props: Props) {
       g.setAttribute("position", new THREE.BufferAttribute(mesh.vertices, 3));
       g.setAttribute("normal", new THREE.BufferAttribute(mesh.normals, 3));
       g.setIndex(new THREE.BufferAttribute(mesh.triangles, 1));
-      s.body = new THREE.Mesh(g, [BODY, HOVER, SELECTED, BODY_SELECTED]);
+      s.body = new THREE.Mesh(g, [BODY, HOVER, SELECTED, BODY_SELECTED, HIDDEN]);
       applyFaceMaterials(s);
       s.model.add(s.body);
 
@@ -388,6 +417,51 @@ export function Viewport(props: Props) {
     if (s) buildHandles(s, handles);
   }, [handles]);
 
+  // Rigid preview: build the moved body's geometry once, then only update its matrix.
+  useEffect(() => {
+    const s = state.current;
+    if (!s) return;
+    if (!rigidPreview || !s.mesh) {
+      if (s.rigid) {
+        s.scene.remove(s.rigid.group, s.rigid.others);
+        s.rigid.group.traverse((o) => (o instanceof THREE.Mesh || o instanceof THREE.LineSegments) && o.geometry.dispose());
+        s.rigid.others.geometry.dispose();
+        s.rigid = null;
+        s.hiddenBody = null;
+        if (s.edgeLines) s.edgeLines.visible = true;
+        applyFaceMaterials(s);
+      }
+      return;
+    }
+    if (!s.rigid || s.rigid.body !== rigidPreview.body) {
+      s.rigid = buildRigid(s.mesh, rigidPreview.body);
+      s.scene.add(s.rigid.group, s.rigid.others);
+      s.hiddenBody = rigidPreview.body;
+      if (s.edgeLines) s.edgeLines.visible = false;
+      applyFaceMaterials(s);
+    }
+    s.rigid.group.matrix.fromArray(rigidPreview.matrix);
+    s.rigid.group.matrixWorldNeedsUpdate = true;
+  }, [rigidPreview, mesh]);
+
+  useEffect(() => {
+    const s = state.current;
+    if (!s) return;
+    if (s.ghost) {
+      s.scene.remove(s.ghost);
+      s.ghost.geometry.dispose();
+      s.ghost = null;
+    }
+    if (ghost) {
+      const g = ghostPrism(ghost.mesh, ghost.face, ghost.distance);
+      if (g) {
+        s.ghost = new THREE.Mesh(g, ghost.distance > 0 ? GHOST_ADD : GHOST_CUT);
+        s.ghost.renderOrder = 5;
+        s.scene.add(s.ghost);
+      }
+    }
+  }, [ghost]);
+
   return (
     <div className="viewport-wrap">
       <div ref={host} className={`viewport${props.edgesOnly ? " picking" : ""}`} />
@@ -404,7 +478,8 @@ function applyFaceMaterials(s: SceneState) {
   g.clearGroups();
   s.mesh.faceGroups.forEach((fg, i) => {
     const m = s.mesh!;
-    const idx = i === s.hoveredFace ? 1 : s.selectedFaces.has(m.faceNames[i]) ? 2 : s.selectedBody && m.faceBody[i] === s.selectedBody ? 3 : 0;
+    const idx =
+      s.hiddenBody && m.faceBody[i] === s.hiddenBody ? 4 : i === s.hoveredFace ? 1 : s.selectedFaces.has(m.faceNames[i]) ? 2 : s.selectedBody && m.faceBody[i] === s.selectedBody ? 3 : 0;
     g.addGroup(fg.start, fg.count, idx);
   });
 }
@@ -439,6 +514,18 @@ function rebuildOverlay(s: SceneState, selected: string[]) {
 
 /** Builds arrows and rings in a unit size; the render loop scales them per frame. */
 function buildHandles(s: SceneState, handles: Handle[]) {
+  // Same handles, new positions (during a drag): move them instead of rebuilding.
+  if (handles.length && handles.length === s.handleObjects.length && handles.every((h, i) => h.id === s.handleObjects[i].handle.id && h.kind === s.handleObjects[i].handle.kind)) {
+    handles.forEach((h, i) => {
+      const ho = s.handleObjects[i];
+      ho.group.position.set(...(h.kind === "arrow" ? h.origin : h.center));
+      if (h.kind === "arrow") ho.group.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(...h.dir).normalize());
+      if (h.color !== ho.handle.color) ho.group.traverse((o) => o instanceof THREE.Mesh && (o.material as THREE.MeshBasicMaterial).visible && (o.material as THREE.MeshBasicMaterial).color.set(h.color));
+      // During a drag keep the original geometry: the drag measures from it.
+      ho.handle = s.dragging ? { ...ho.handle, color: h.color } : h;
+    });
+    return;
+  }
   clearGroup(s.gizmos);
   s.handleObjects = [];
   for (const h of handles) {
@@ -491,4 +578,69 @@ function clearGroup(group: THREE.Group) {
       if (o instanceof THREE.Mesh || o instanceof THREE.Line || o instanceof LineSegments2) o.geometry.dispose();
     });
   }
+}
+
+// ---- client-side previews --------------------------------------------------------------
+
+/** The moved body's faces and edges in their own group, plus the other bodies' edges. */
+function buildRigid(m: MeshData, body: string): { body: string; group: THREE.Group; others: THREE.LineSegments } {
+  const idx: number[] = [];
+  m.faceGroups.forEach((g, i) => {
+    if (m.faceBody[i] === body) for (let t = g.start; t < g.start + g.count; t++) idx.push(m.triangles[t]);
+  });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(m.vertices, 3));
+  geo.setAttribute("normal", new THREE.BufferAttribute(m.normals, 3));
+  geo.setIndex(idx);
+  const moved: number[] = [], still: number[] = [];
+  m.edgeGroups.forEach((g, i) => {
+    const out = m.edgeBody[i] === body ? moved : still;
+    for (let k = g.start; k < g.start + g.count; k++) out.push(m.edges[k * 3], m.edges[k * 3 + 1], m.edges[k * 3 + 2]);
+  });
+  const lines = (pts: number[]) => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+    return new THREE.LineSegments(g, EDGE);
+  };
+  const group = new THREE.Group();
+  group.matrixAutoUpdate = false;
+  group.add(new THREE.Mesh(geo, BODY_SELECTED), lines(moved));
+  return { body, group, others: lines(still) };
+}
+
+/** Prism swept from a face along its normal: the face's triangles as caps, its boundary as walls. */
+function ghostPrism(m: MeshData, face: string, distance: number): THREE.BufferGeometry | null {
+  const i = m.faceNames.indexOf(face);
+  if (i < 0) return null;
+  const g = m.faceGroups[i];
+  const v = (j: number) => [m.vertices[j * 3], m.vertices[j * 3 + 1], m.vertices[j * 3 + 2]];
+  // Face normal from the mesh normals of its first triangle.
+  const j0 = m.triangles[g.start];
+  const n = [m.normals[j0 * 3], m.normals[j0 * 3 + 1], m.normals[j0 * 3 + 2]];
+  const off = (p: number[]) => [p[0] + n[0] * distance, p[1] + n[1] * distance, p[2] + n[2] * distance];
+  const pos: number[] = [];
+  // Boundary edges are used by exactly one triangle; vertices are welded by position.
+  const key = (j: number) => v(j).map((x) => Math.round(x * 1e4)).join(",");
+  const count = new Map<string, { a: number; b: number; n: number }>();
+  for (let t = g.start; t < g.start + g.count; t += 3) {
+    const tri = [m.triangles[t], m.triangles[t + 1], m.triangles[t + 2]];
+    const a = v(tri[0]), b = v(tri[1]), c = v(tri[2]);
+    pos.push(...a, ...b, ...c, ...off(a), ...off(b), ...off(c));
+    for (let k = 0; k < 3; k++) {
+      const x = tri[k], y = tri[(k + 1) % 3];
+      const kx = key(x), ky = key(y);
+      const id = kx < ky ? `${kx}|${ky}` : `${ky}|${kx}`;
+      const e = count.get(id);
+      if (e) e.n++;
+      else count.set(id, { a: x, b: y, n: 1 });
+    }
+  }
+  for (const e of count.values()) {
+    if (e.n !== 1) continue;
+    const a = v(e.a), b = v(e.b), a2 = off(a), b2 = off(b);
+    pos.push(...a, ...b, ...b2, ...a, ...b2, ...a2);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  return geo;
 }

@@ -26,6 +26,27 @@ export function faceAnchor(m: MeshData, faceName: string): { p: Vec3; n: Vec3 } 
 }
 
 /**
+ * Directions for a fillet handle on the edge between faces A and B: the edge
+ * tangent, and `along` = the direction on face A perpendicular to the edge,
+ * pointing away from it (where the fillet's tangent line moves as it grows).
+ */
+export function edgeFrame(m: MeshData, edgeName: string): { tangent: Vec3; along: Vec3 } | null {
+  const inner = edgeName.replace(/#\d+$/, "").replace(/^\[|\]$/g, "");
+  const [a, b] = splitPair(inner);
+  const A = a ? faceAnchor(m, a) : null, B = b ? faceAnchor(m, b) : null;
+  if (!A || !B) return null;
+  // Prefer the planar face to slide on: its direction is the same along the whole edge.
+  const planarA = m.facePlanar[m.faceNames.indexOf(a)], planarB = m.facePlanar[m.faceNames.indexOf(b)];
+  const [nA, nB] = !planarA && planarB ? [B.n, A.n] : [A.n, B.n];
+  const t = cross(nA, nB);
+  if (Math.hypot(...t) < 1e-6) return null; // tangent faces: no sharp edge
+  const tangent = unit(t);
+  let along = unit(cross(tangent, nA));
+  if (dot(along, nB) > 0) along = [-along[0], -along[1], -along[2]];
+  return { tangent, along };
+}
+
+/**
  * Midpoint of an edge and the direction pointing into the material, between
  * its two adjacent faces (the way a fillet grows).
  */
@@ -98,6 +119,9 @@ function halfway(pts: Vec3[]): Vec3 {
   }
   return pts[0];
 }
+
+const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 
 const vtx = (m: MeshData, i: number): Vec3 => [m.vertices[i * 3], m.vertices[i * 3 + 1], m.vertices[i * 3 + 2]];
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];

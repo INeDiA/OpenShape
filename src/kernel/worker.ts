@@ -21,17 +21,18 @@ const ready = opencascade({ locateFile: () => wasmUrl })
 async function handleEvaluate(req: Extract<KernelRequest, { kind: "evaluate" }>) {
   const t0 = performance.now();
   try {
-    const { body, bodies, faceBody, sketches, status } = await evaluate(req.doc, { stopBefore: req.stopBefore });
+    const { body, bodies, faceBody, sketches, status, ownsBody } = await evaluate(req.doc, { stopBefore: req.stopBefore });
     // Read everything we need before freeing kernel memory.
     const bodyInfo = bodies.map((b) => ({ id: b.id, faces: b.shape.shape.faces.length }));
     let mesh = null;
     if (body) {
       try {
-        mesh = meshBody(body, faceBody);
+        mesh = meshBody(body, faceBody, req.preview);
       } catch (e) {
         status.push({ id: "__mesh__", ok: false, error: `Meshing failed: ${String(e)}` });
       }
-      body.shape.delete();
+      // Bodies are cached for incremental evaluation; only a compound made for this result is ours to free.
+      if (ownsBody) body.shape.delete();
     }
     const transfer: Transferable[] = [];
     if (mesh) transfer.push(mesh.vertices.buffer, mesh.normals.buffer, mesh.triangles.buffer, mesh.edges.buffer);
@@ -45,7 +46,7 @@ async function handleEvaluate(req: Extract<KernelRequest, { kind: "evaluate" }>)
 
 async function handleExport(req: Extract<KernelRequest, { kind: "export" }>) {
   try {
-    const { body } = await evaluate(req.doc);
+    const { body, ownsBody } = await evaluate(req.doc);
     if (!body) return post({ kind: "exported", seq: req.seq, error: "No body to export" });
     try {
       if (req.format === "step") {
@@ -57,7 +58,7 @@ async function handleExport(req: Extract<KernelRequest, { kind: "export" }>) {
         post({ kind: "exported", seq: req.seq, mesh: { vertices, triangles } }, [vertices.buffer, triangles.buffer]);
       }
     } finally {
-      body.shape.delete();
+      if (ownsBody) body.shape.delete();
     }
   } catch (e) {
     post({ kind: "exported", seq: req.seq, error: String(e) });

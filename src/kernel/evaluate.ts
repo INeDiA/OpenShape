@@ -14,7 +14,6 @@ import {
   Vector,
   type AnyShape,
   type Drawing,
-  type Edge,
   type Face,
   type Shape3D,
 } from "replicad";
@@ -36,6 +35,8 @@ import { frameToLocal, frameToWorld, planeFrame, standardFrame, type Frame, type
 import { entityMap, pointOf } from "../sketch/model";
 import { arcMidpoint, findLoops, loopPolygon, nestLoops, type Loop } from "../sketch/profiles";
 import { parseSTL } from "../io/stl";
+import { stretchFace } from "./stretch";
+import { treatEdges } from "./edgeTreatment";
 
 export interface EvaluationResult {
   /** All bodies combined (a compound when there are several): for display and export. */
@@ -46,6 +47,10 @@ export interface EvaluationResult {
   faceBody: Map<number, BodyId>;
   sketches: SketchPreview[];
   status: FeatureStatus[];
+  /** True when `body` is a compound made for this result and may be freed by the caller. */
+  ownsBody: boolean;
+  /** Features taken from the incremental cache instead of being recomputed. */
+  reused: number;
 }
 
 // ---- sketches -------------------------------------------------------------------
@@ -212,8 +217,13 @@ interface SketchContext {
 
 /** Mutable modeling state while replaying the history. */
 class Bodies {
-  readonly map = new Map<BodyId, NamedShape>();
+  readonly map: Map<BodyId, NamedShape>;
   last: BodyId | null = null;
+
+  constructor(from?: { map: Map<BodyId, NamedShape>; last: BodyId | null }) {
+    this.map = new Map(from?.map);
+    this.last = from?.last ?? null;
+  }
 
   set(id: BodyId, shape: NamedShape) {
     this.map.set(id, shape);
@@ -247,25 +257,80 @@ class Bodies {
   }
 }
 
-export async function evaluate(doc: Document, opts: EvaluateOptions = {}): Promise<EvaluationResult> {
-  const sketches = new Map<string, SketchContext>();
-  const previews: SketchPreview[] = [];
-  const status: FeatureStatus[] = [];
-  const bodies = new Bodies();
+// ---- incremental evaluation ---------------------------------------------------------
+//
+// Kernel shapes are immutable (every operation returns a new shape), so the
+// state after each feature can be kept and reused: when only the last
+// features change (e.g. dragging a push/pull handle), replay starts from the
+// last unchanged feature instead of from scratch.
 
-  for (const f of doc.features) {
-    if (f.id === opts.stopBefore) break;
+interface Snapshot {
+  key: string;
+  bodies: Map<BodyId, NamedShape>;
+  last: BodyId | null;
+  sketches: Map<string, SketchContext>;
+  previews: SketchPreview[];
+  status: FeatureStatus[];
+}
+
+let snapshots: Snapshot[] = [];
+const featureJson = new WeakMap<Feature, string>();
+
+/** Drops cached intermediate states (tests, or to free memory). */
+export function clearEvaluationCache() {
+  snapshots = [];
+}
+
+/** FNV-1a over the previous key and this feature's JSON: identifies the history prefix. */
+function prefixKey(prev: string, f: Feature): string {
+  let json = featureJson.get(f);
+  if (json === undefined) {
+    json = JSON.stringify(f);
+    featureJson.set(f, json);
+  }
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  const src = prev + "\u0000" + json;
+  for (let i = 0; i < src.length; i++) {
+    const c = src.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ c, 0x0100019d) >>> 0;
+  }
+  return `${h1.toString(36)}.${h2.toString(36)}.${src.length}`;
+}
+
+export async function evaluate(doc: Document, opts: EvaluateOptions = {}): Promise<EvaluationResult> {
+  const stop = opts.stopBefore ? doc.features.findIndex((f) => f.id === opts.stopBefore) : -1;
+  const features = stop >= 0 ? doc.features.slice(0, stop) : doc.features;
+  const keys: string[] = [];
+  features.forEach((f, i) => keys.push(prefixKey(i ? keys[i - 1] : "", f)));
+
+  // Longest cached prefix of this history.
+  let reuse = 0;
+  while (reuse < features.length && reuse < snapshots.length && snapshots[reuse].key === keys[reuse]) reuse++;
+  const from = reuse ? snapshots[reuse - 1] : null;
+
+  const sketches = new Map<string, SketchContext>(from?.sketches);
+  const previews: SketchPreview[] = [...(from?.previews ?? [])];
+  const status: FeatureStatus[] = [...(from?.status ?? [])];
+  const bodies = new Bodies(from ? { map: from.bodies, last: from.last } : undefined);
+  const next = snapshots.slice(0, reuse);
+
+  for (let i = reuse; i < features.length; i++) {
+    const f = features[i];
     if (f.suppressed) {
       status.push({ id: f.id, ok: true });
-      continue;
+    } else {
+      try {
+        const warning = await applyFeature(f, bodies, sketches, previews);
+        status.push(warning ? { id: f.id, ok: false, error: warning } : { id: f.id, ok: true });
+      } catch (e) {
+        status.push({ id: f.id, ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
     }
-    try {
-      const warning = await applyFeature(f, bodies, sketches, previews);
-      status.push(warning ? { id: f.id, ok: false, error: warning } : { id: f.id, ok: true });
-    } catch (e) {
-      status.push({ id: f.id, ok: false, error: e instanceof Error ? e.message : String(e) });
-    }
+    next.push({ key: keys[i], bodies: new Map(bodies.map), last: bodies.last, sketches: new Map(sketches), previews: [...previews], status: [...status] });
   }
+  // A shorter history (rollback) keeps the longer cache: it's still a valid prefix.
+  if (features.length >= snapshots.length || reuse < features.length) snapshots = next;
 
   const list = [...bodies.map].map(([id, shape]) => ({ id, shape }));
   const faceBody = new Map<number, BodyId>();
@@ -278,7 +343,7 @@ export async function evaluate(doc: Document, opts: EvaluateOptions = {}): Promi
     body = { shape: makeCompound(list.map((b) => b.shape.shape.clone())) as unknown as Shape3D, names };
   }
   for (const b of list) for (const f of b.shape.shape.faces) faceBody.set(f.hashCode, b.id);
-  return { body, bodies: list, faceBody, sketches: previews, status };
+  return { body, bodies: list, faceBody, sketches: previews, status, ownsBody: list.length > 1, reused: reuse };
 }
 
 async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, SketchContext>, previews: SketchPreview[]): Promise<string | undefined> {
@@ -335,9 +400,23 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
         selectedNames = new Set(found);
         selected = new Set(found.map((n) => edges.byName.get(n)!.hashCode));
       }
-      const radius = selected ? (e: Edge) => (selected!.has(e.hashCode) ? f.size : null) : f.size;
-      const shape = ensureValid(f.type === "fillet" ? body.shape.fillet(radius) : body.shape.chamfer(radius), `${f.type === "fillet" ? "Radius" : "Distance"} ${f.size} is too large for the selected edges`);
-      const names = transferNames(shape, [body], (_face, sample) => `${f.id}:blend:${nearestEdgeName(sample.p, edges, selectedNames)}`);
+      // Per-edge overrides; keys may carry a "#k" added when naming the blend face.
+      const override = new Map<number, number>();
+      for (const [key, value] of Object.entries(f.overrides ?? {})) {
+        const e = edges.byName.get(key) ?? edges.byName.get(key.replace(/#\d+$/, ""));
+        if (e && value > 0) override.set(e.hashCode, value);
+      }
+      // Edges to treat with their sizes (every edge when none is selected).
+      const items = [...edges.byName]
+        .filter(([, e]) => !selected || selected.has(e.hashCode))
+        .map(([name, e]) => ({ name, edge: e, size: override.get(e.hashCode) ?? f.size }));
+      const { shape: raw, generated } = treatEdges(f.type, body.shape, items);
+      const shape = ensureValid(raw, `${f.type === "fillet" ? "Radius" : "Distance"} ${f.size} is too large for the selected edges`);
+      // Blend faces are named after the edge that generated them (OCCT history);
+      // corner patches, generated by vertices, fall back to the nearest edge.
+      const blendName = new Map<number, string>();
+      for (const it of items) for (const h of generated.get(it.edge.hashCode) ?? []) blendName.set(h, `${f.id}:blend:${it.name}`);
+      const names = transferNames(shape, [body], (face, sample) => blendName.get(face.hashCode) ?? `${f.id}:blend:${nearestEdgeName(sample.p, edges, selectedNames)}`);
       bodies.set(owner.id, { shape, names });
       return warning;
     }
@@ -347,6 +426,17 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
       const owner = bodies.withFace(f.face);
       const body = owner.shape;
       const { face, point, normal } = planarFaceFrame(body, f.face, 0);
+      // Preferred: move the face, stretching the walls (fillets and holes ride along).
+      try {
+        const st = stretchFace(body, face, normal, f.distance, f.id);
+        if (st) {
+          ensureValid(st.shape, "stretch");
+          bodies.set(owner.id, st);
+          return;
+        }
+      } catch {
+        /* not a clean stretch: extrude the face instead */
+      }
       const edges = nameEdges(body.shape, body.names);
       const faceEdges = new Set(face.edges.map((e) => edges.byHash.get(e.hashCode)!).filter(Boolean));
       const tool = basicFaceExtrusion(face, new Vector([normal[0] * f.distance, normal[1] * f.distance, normal[2] * f.distance])) as Shape3D;
@@ -416,11 +506,18 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
   }
 }
 
-export function meshBody(body: NamedShape, faceBody: Map<number, BodyId> = new Map()): MeshData {
-  const m = body.shape.mesh({ tolerance: 0.05, angularTolerance: 15 });
-  const e = body.shape.meshEdges({ tolerance: 0.05, angularTolerance: 15 });
-  const edgeNaming = nameEdges(body.shape, body.names);
+/** `fast` meshes coarser and skips edge naming: used for live previews while dragging. */
+export function meshBody(body: NamedShape, faceBody: Map<number, BodyId> = new Map(), fast = false): MeshData {
+  const quality = fast ? { tolerance: 0.15, angularTolerance: 25 } : { tolerance: 0.05, angularTolerance: 15 };
+  const m = body.shape.mesh(quality);
+  const e = body.shape.meshEdges(quality);
+  const edgeNaming = fast ? { byHash: new Map<number, string>() } : nameEdges(body.shape, body.names);
   const types = new Map(body.shape.faces.map((f) => [f.hashCode, f.geomType]));
+  const edgeBody = new Map<number, BodyId>();
+  for (const f of body.shape.faces) {
+    const b = faceBody.get(f.hashCode);
+    if (b) for (const e of f.edges) edgeBody.set(e.hashCode, b);
+  }
   return {
     vertices: new Float32Array(m.vertices),
     normals: new Float32Array(m.normals),
@@ -432,5 +529,6 @@ export function meshBody(body: NamedShape, faceBody: Map<number, BodyId> = new M
     edges: new Float32Array(e.lines),
     edgeGroups: e.edgeGroups,
     edgeNames: e.edgeGroups.map((g) => edgeNaming.byHash.get(g.edgeId) ?? "?"),
+    edgeBody: e.edgeGroups.map((g) => edgeBody.get(g.edgeId) ?? ""),
   };
 }

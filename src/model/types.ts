@@ -57,6 +57,8 @@ export interface EdgeTreatmentFeature extends FeatureBase {
   size: number;
   /** Persistent edge names to treat (see kernel/naming.ts); empty means every edge. */
   edges: string[];
+  /** Per-edge sizes overriding `size`, keyed by persistent edge name. */
+  overrides?: Record<string, number>;
 }
 
 /** Moves a planar face along its normal: positive adds material, negative removes it. */
@@ -164,6 +166,8 @@ export interface MeshData {
   edgeGroups: { start: number; count: number; edgeId: number }[];
   /** Persistent name of each edge group. */
   edgeNames: string[];
+  /** Body each edge group belongs to. */
+  edgeBody: BodyId[];
 }
 
 export interface FeatureStatus {
@@ -181,7 +185,7 @@ export interface SketchPreview {
 }
 
 export type KernelRequest =
-  | { kind: "evaluate"; seq: number; doc: Document; stopBefore?: string }
+  | { kind: "evaluate"; seq: number; doc: Document; stopBefore?: string; preview?: boolean }
   | { kind: "export"; seq: number; doc: Document; format: "step" | "mesh" };
 
 export type KernelResponse =

@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { fileURLToPath } from "node:url";
 import opencascade from "replicad-opencascadejs";
-import { setOC } from "replicad";
+import { measureVolume, setOC } from "replicad";
 import { addCircle, addRectangle } from "../sketch/builders";
 import { emptySketch, skId, type SketchData } from "../sketch/model";
 import { findLoops } from "../sketch/profiles";
@@ -185,5 +185,133 @@ describe("validity", () => {
     const huge: Feature = { ...base, id: newId("fi"), type: "fillet", size: 40, edges: [edge] };
     const r = await evaluate({ ...doc, features: [...doc.features, huge] });
     expect(r.status.find((x) => x.id === huge.id)?.ok).toBe(false);
+  });
+});
+
+describe("incremental evaluation", () => {
+  it("reuses the unchanged prefix and matches a full replay", async () => {
+    const { clearEvaluationCache } = await import("./evaluate");
+    const { doc, ex } = block();
+    const pull = (d: number): Feature => ({ ...base, id: "pp-fixed", type: "pushpull", face: `${ex.id}:end`, distance: d });
+    clearEvaluationCache();
+    await evaluate({ ...doc, features: [...doc.features, pull(5)] });
+    const incremental = await evaluate({ ...doc, features: [...doc.features, pull(9)] });
+    expect(incremental.reused).toBe(2); // sketch + extrude reused, only the push/pull recomputed
+    clearEvaluationCache();
+    const full = await evaluate({ ...doc, features: [...doc.features, pull(9)] });
+    expect(full.reused).toBe(0);
+    const size = (r: typeof full) => r.body!.shape.boundingBox.bounds[1][2];
+    expect(size(incremental)).toBeCloseTo(size(full));
+    expect(new Set(incremental.body!.names.values())).toEqual(new Set(full.body!.names.values()));
+  });
+
+  it("invalidates downstream features when an earlier one changes", async () => {
+    const { doc, ex } = block();
+    const pull: Feature = { ...base, id: "pp-x", type: "pushpull", face: `${ex.id}:end`, distance: 5 };
+    await evaluate({ ...doc, features: [...doc.features, pull] });
+    const taller = doc.features.map((f) => (f.id === ex.id ? { ...f, distance: 40 } : f));
+    const r = await evaluate({ ...doc, features: [...taller, pull] });
+    expect(r.reused).toBe(1); // only the sketch
+    expect(Math.round(r.body!.shape.boundingBox.bounds[1][2])).toBe(45);
+  });
+});
+
+describe("push/pull moves the face (stretch)", () => {
+  const edgeAt = (r: Awaited<ReturnType<typeof evaluate>>, pred: (p: number[]) => boolean) => {
+    const b = r.bodies[0].shape;
+    return [...nameEdgesOf(b)].find(([, e]) => pred(e.pointAt(0.5).toTuple()))?.[0];
+  };
+  const nameEdgesOf = (b: { shape: import("replicad").Shape3D; names: Map<number, string> }) => nameEdgesFn(b.shape, b.names).byName;
+  let nameEdgesFn: typeof import("./naming").nameEdges;
+  beforeAll(async () => {
+    nameEdgesFn = (await import("./naming")).nameEdges;
+  });
+
+  it("carries fillets along instead of leaving them below", async () => {
+    const { doc, ex } = block();
+    const filletAll: Feature = { ...base, id: newId("fi"), type: "fillet", size: 1, edges: [] };
+    const pull: Feature = { ...base, id: newId("pp"), type: "pushpull", face: `${ex.id}:end`, distance: 12 };
+    const r = await volumeOf({ ...doc, features: [...doc.features, filletAll, pull] });
+    expect(r.size).toEqual([40, 30, 32]);
+    // Still one filleted box: same face count as before the pull (no ledge, no extra walls).
+    const before = await volumeOf({ ...doc, features: [...doc.features, filletAll] });
+    expect(r.faces).toBe(before.faces);
+    const names = [...r.body.names.values()];
+    expect(names).toContain(`${pull.id}:end`);
+    expect(names.filter((n) => n.includes(":blend:")).length).toBeGreaterThan(0); // fillets survived, with their names
+  });
+
+  it("lets you fillet a corner next to an existing fillet after a push/pull", async () => {
+    const { doc, ex } = block();
+    const s = doc.features[0];
+    const front = s.type === "sketch" ? s.sketch.entities.filter((e) => e.kind === "line")[0].id : "";
+    const topFront: Feature = { ...base, id: newId("fi"), type: "fillet", size: 2, edges: [`[${ex.id}:end|${ex.id}:side:${front}]`] };
+    const pull: Feature = { ...base, id: newId("pp"), type: "pushpull", face: `${ex.id}:end`, distance: 10 };
+    const stage = { ...doc, features: [...doc.features, topFront, pull] };
+    const r = await evaluate(stage);
+    expect(r.status.every((x) => x.ok)).toBe(true);
+    // Vertical front-right corner, now 30 mm tall, ends under the moved top fillet.
+    const corner = edgeAt(r, ([x, y]) => Math.abs(x - 20) < 1e-3 && Math.abs(y + 15) < 1e-3);
+    expect(corner).toBeDefined();
+    const fillet: Feature = { ...base, id: newId("fi"), type: "fillet", size: 4, edges: [corner!] };
+    const r2 = await evaluate({ ...stage, features: [...stage.features, fillet] });
+    expect(r2.status.find((x) => x.id === fillet.id)).toEqual({ id: fillet.id, ok: true });
+  });
+
+  it("falls back to extruding when the face can't be stretched cleanly", async () => {
+    // A boss on top of a block: pulling the boss top stretches the boss walls only.
+    const { doc, ex } = block();
+    const boss = makeSketch(doc, "XY", 0, addCircle(emptySketch(), 0, 0, 5).sketch);
+    doc.features.push({ ...boss, face: `${ex.id}:end` }, { ...makeExtrude(doc, boss.id, "join"), distance: 5 });
+    const bossEx = doc.features[3];
+    const pull: Feature = { ...base, id: newId("pp"), type: "pushpull", face: `${bossEx.id}:end`, distance: 8 };
+    const r = await volumeOf({ ...doc, features: [...doc.features, pull] });
+    expect(r.size).toEqual([40, 30, 33]);
+  });
+});
+
+describe("per-edge fillet radius", () => {
+  it("enlarges one corner of an all-edges fillet, then pushes the top (the user's case)", async () => {
+    const { doc, ex } = block();
+    const s = doc.features[0];
+    const [front, right] = s.type === "sketch" ? s.sketch.entities.filter((e) => e.kind === "line").map((l) => l.id) : [];
+    const corner = `[${ex.id}:side:${front}|${ex.id}:side:${right}]`;
+    const fillet: Feature = { ...base, id: newId("fi"), type: "fillet", size: 1, edges: [], overrides: { [corner]: 4 } };
+    const pull: Feature = { ...base, id: newId("pp"), type: "pushpull", face: `${ex.id}:end`, distance: 12 };
+    const plain = await volumeOf({ ...doc, features: [...doc.features, { ...fillet, overrides: undefined } as Feature, pull] });
+    const r = await volumeOf({ ...doc, features: [...doc.features, fillet, pull] });
+    expect(r.size).toEqual([40, 30, 32]);
+    // A bigger corner radius removes more material than r1 everywhere.
+    expect(measureVolume(r.body.shape)).toBeLessThan(measureVolume(plain.body.shape) - 10);
+  });
+});
+
+describe("fillet handle direction", () => {
+  it("slides on the face, perpendicular to the edge", async () => {
+    const { meshBody } = await import("./evaluate");
+    const { edgeFrame } = await import("../viewport/meshGeom");
+    const { doc, ex } = block();
+    const s = doc.features[0];
+    const front = s.type === "sketch" ? s.sketch.entities.filter((e) => e.kind === "line")[0].id : "";
+    const r = await evaluate(doc);
+    const m = meshBody(r.body!, r.faceBody);
+    const fr = edgeFrame(m, `[${ex.id}:end|${ex.id}:side:${front}]`)!;
+    expect(Math.abs(fr.tangent[0])).toBeCloseTo(1); // edge runs along X
+    expect(fr.along[1]).toBeCloseTo(1); // on the top face, away from the front edge (+Y)
+    expect(Math.abs(fr.along[2])).toBeCloseTo(0);
+  });
+});
+
+describe("blend face names come from the fillet history", () => {
+  it("names a large corner fillet after its own edge, not a neighbour", async () => {
+    const { doc, ex } = block();
+    const s = doc.features[0];
+    const [front, right] = s.type === "sketch" ? s.sketch.entities.filter((e) => e.kind === "line").map((l) => l.id) : [];
+    const corner = `[${ex.id}:side:${front}|${ex.id}:side:${right}]`;
+    const fillet: Feature = { ...base, id: newId("fi"), type: "fillet", size: 1, edges: [], overrides: { [corner]: 12 } };
+    const r = await evaluate({ ...doc, features: [...doc.features, fillet] });
+    expect(r.status.every((x) => x.ok)).toBe(true);
+    const names = [...r.bodies[0].shape.names.values()];
+    expect(names.filter((n) => n.startsWith(`${fillet.id}:blend:${corner}`))).toHaveLength(1);
   });
 });

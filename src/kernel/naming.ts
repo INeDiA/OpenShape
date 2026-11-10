@@ -53,10 +53,48 @@ const normalAt = (face: Face, p: Vec3): Vec3 => unit(face.normalAt(p).toTuple() 
  * plus the face normal there. Face centers can't be used: for a face with a
  * hole the center of mass lies in the hole.
  */
+export interface FaceBounds {
+  lo: Vec3;
+  hi: Vec3;
+}
+
+interface MeshInfo {
+  samples: Map<number, Sample>;
+  /** Per-face bounds from the triangulation (padded): much cheaper than OCCT boxes. */
+  bounds: Map<number, FaceBounds>;
+}
+
+// Shapes are immutable, so their mesh-derived info can be cached by object.
+const meshInfoCache = new WeakMap<Shape3D, MeshInfo>();
+const BOUNDS_PAD = 0.3; // > mesh chord tolerance
+
 export function faceSamples(shape: Shape3D): Map<number, Sample> {
+  return meshInfo(shape).samples;
+}
+
+export function faceBounds(shape: Shape3D): Map<number, FaceBounds> {
+  return meshInfo(shape).bounds;
+}
+
+function meshInfo(shape: Shape3D): MeshInfo {
+  const cached = meshInfoCache.get(shape);
+  if (cached) return cached;
   const m = shape.mesh({ tolerance: 0.2, angularTolerance: 20 });
   const faces = new Map(shape.faces.map((f) => [f.hashCode, f]));
   const out = new Map<number, Sample>();
+  const bounds = new Map<number, FaceBounds>();
+  for (const g of m.faceGroups) {
+    const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
+    for (let t = g.start; t < g.start + g.count; t++) {
+      const i = m.triangles[t];
+      for (let k = 0; k < 3; k++) {
+        const v = m.vertices[i * 3 + k];
+        if (v < lo[k]) lo[k] = v;
+        if (v > hi[k]) hi[k] = v;
+      }
+    }
+    bounds.set(g.faceId, { lo: lo.map((v) => v - BOUNDS_PAD) as Vec3, hi: hi.map((v) => v + BOUNDS_PAD) as Vec3 });
+  }
   for (const g of m.faceGroups) {
     let best = -1, bestArea = -1;
     for (let t = g.start; t < g.start + g.count; t += 3) {
@@ -92,7 +130,9 @@ export function faceSamples(shape: Shape3D): Map<number, Sample> {
     }
     out.set(g.faceId, { p, n: unit(n) });
   }
-  return out;
+  const info = { samples: out, bounds };
+  meshInfoCache.set(shape, info);
+  return info;
 }
 
 // ---- naming new solids -------------------------------------------------------
@@ -199,11 +239,12 @@ interface SourceFace {
 function sourceFaces(sources: NamedShape[]): SourceFace[] {
   const out: SourceFace[] = [];
   for (const s of sources) {
+    const bounds = faceBounds(s.shape);
     for (const face of s.shape.faces) {
       const name = s.names.get(face.hashCode);
-      if (!name) continue;
-      const [lo, hi] = face.boundingBox.bounds as [Vec3, Vec3];
-      out.push({ face, name, lo, hi });
+      const b = bounds.get(face.hashCode);
+      if (!name || !b) continue;
+      out.push({ face, name, lo: b.lo, hi: b.hi });
     }
   }
   return out;
@@ -215,13 +256,23 @@ function sourceFaces(sources: NamedShape[]): SourceFace[] {
  */
 export function transferNames(result: Shape3D, sources: NamedShape[], nameNew: (face: Face, s: Sample) => string): FaceNames {
   const samples = faceSamples(result);
-  const candidates = sourceFaces(sources);
   const names: FaceNames = new Map();
   const tol = 1e-3;
+  // Fast path: faces the operation left untouched are the very same kernel face
+  // (same hash), so they keep their name without any geometric test.
+  const byHash = new Map<number, string>();
+  for (const src of sources) for (const [h, n] of src.names) byHash.set(h, n.replace(/#\d+$/, ""));
+  let candidates: SourceFace[] | null = null;
 
   for (const face of result.faces) {
     const s = samples.get(face.hashCode);
     if (!s) continue;
+    const same = byHash.get(face.hashCode);
+    if (same !== undefined) {
+      names.set(face.hashCode, same);
+      continue;
+    }
+    candidates ??= sourceFaces(sources);
     let name: string | null = null;
     for (const c of candidates) {
       if (c.face.geomType !== face.geomType) continue;
