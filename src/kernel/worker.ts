@@ -24,7 +24,7 @@ ctx.onmessage = async (ev: MessageEvent<KernelRequest>) => {
 
   if (req.kind === "evaluate") {
     const t0 = performance.now();
-    const { body, sketches, status } = evaluate(req.doc);
+    const { body, sketches, status } = await evaluate(req.doc, { stopBefore: req.stopBefore });
     let mesh = null;
     if (body) {
       try {
@@ -32,7 +32,7 @@ ctx.onmessage = async (ev: MessageEvent<KernelRequest>) => {
       } catch (e) {
         status.push({ id: "__mesh__", ok: false, error: `Meshing failed: ${String(e)}` });
       }
-      body.delete();
+      body.shape.delete();
     }
     const transfer: Transferable[] = [];
     if (mesh) transfer.push(mesh.vertices.buffer, mesh.normals.buffer, mesh.triangles.buffer, mesh.edges.buffer);
@@ -41,18 +41,24 @@ ctx.onmessage = async (ev: MessageEvent<KernelRequest>) => {
   }
 
   if (req.kind === "export") {
-    const { body } = evaluate(req.doc);
+    const { body } = await evaluate(req.doc);
     if (!body) {
-      post({ kind: "exported", seq: req.seq, blob: null, error: "No body to export" });
+      post({ kind: "exported", seq: req.seq, error: "No body to export" });
       return;
     }
     try {
-      const blob = req.format === "step" ? body.blobSTEP() : body.blobSTL({ binary: true });
-      post({ kind: "exported", seq: req.seq, blob });
+      if (req.format === "step") {
+        post({ kind: "exported", seq: req.seq, blob: body.shape.blobSTEP() });
+      } else {
+        // Export-quality tessellation: much finer than the viewport mesh.
+        const m = body.shape.mesh({ tolerance: 0.01, angularTolerance: 5 });
+        const vertices = new Float32Array(m.vertices), triangles = new Uint32Array(m.triangles);
+        post({ kind: "exported", seq: req.seq, mesh: { vertices, triangles } }, [vertices.buffer, triangles.buffer]);
+      }
     } catch (e) {
-      post({ kind: "exported", seq: req.seq, blob: null, error: String(e) });
+      post({ kind: "exported", seq: req.seq, error: String(e) });
     } finally {
-      body.delete();
+      body.shape.delete();
     }
   }
 };

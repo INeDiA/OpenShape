@@ -37,16 +37,25 @@ export class KernelClient {
     };
   }
 
-  evaluate(doc: Document) {
+  evaluate(doc: Document, stopBefore?: string) {
     const seq = ++this.seq;
     this.latestEval = seq;
-    this.send({ kind: "evaluate", seq, doc });
+    this.send({ kind: "evaluate", seq, doc, stopBefore });
   }
 
-  export(doc: Document, format: "step" | "stl"): Promise<Blob> {
+  exportSTEP(doc: Document): Promise<Blob> {
+    return this.request(doc, "step").then((r) => r.blob!);
+  }
+
+  /** Fine tessellation for mesh formats (STL, 3MF, ...). */
+  exportMesh(doc: Document): Promise<{ vertices: Float32Array; triangles: Uint32Array }> {
+    return this.request(doc, "mesh").then((r) => r.mesh!);
+  }
+
+  private request(doc: Document, format: "step" | "mesh") {
     const seq = ++this.seq;
-    return new Promise((resolve, reject) => {
-      this.pendingExports.set(seq, (r) => (r.blob ? resolve(r.blob) : reject(new Error(r.error))));
+    return new Promise<Extract<KernelResponse, { kind: "exported" }>>((resolve, reject) => {
+      this.pendingExports.set(seq, (r) => (r.error ? reject(new Error(r.error)) : resolve(r)));
       this.send({ kind: "export", seq, doc, format });
     });
   }

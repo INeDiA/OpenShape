@@ -16,6 +16,11 @@ const ICON: Record<Feature["type"], string> = {
   revolve: "↻",
   fillet: "◜",
   chamfer: "◸",
+  pushpull: "⇕",
+  shell: "▢",
+  mirror: "⇋",
+  pattern: "⁘",
+  import: "⇩",
 };
 
 export function HistoryPanel({ features, status, selectedId, onSelect, onEdit, onToggle, onDelete }: Props) {

@@ -6,17 +6,42 @@ import {
   lastSketch,
   makeEdgeTreatment,
   makeExtrude,
+  makeImport,
+  makeMirror,
+  makePattern,
+  makePushPull,
   makeRevolve,
+  makeShell,
   makeSketch,
+  makeSketchOnFace,
   removeFeature,
   updateFeature,
 } from "./model/doc";
 import type { Document, Feature, FeatureStatus, MeshData, PlaneName, SketchFeature, SketchPreview } from "./model/types";
 import { SketchEditor } from "./sketch/SketchEditor";
-import { loadSolver } from "./sketch/solver";
+import { loadSolver, solve, solverReady } from "./sketch/solver";
+import { resolveDocument, type SketchSolver } from "./model/resolve";
+import { VariablesPanel } from "./ui/VariablesPanel";
+import { EXPORT_FORMATS, exportMesh, type ExportFormat } from "./io/exporters";
+import type { FileMeta } from "./io/fileFormat";
+import { downloadBlob, GENERATOR, loadAutosave, openDocument, resetFileHandle, saveDocument, writeAutosave } from "./io/storage";
+
+const UNTITLED = "Untitled.openshape";
+const newMeta = (): FileMeta => {
+  const now = new Date().toISOString();
+  return { created: now, modified: now, generator: GENERATOR };
+};
+const baseName = (f: string) => f.replace(/\.openshape$/i, "") || "model";
+
+/** Re-solves sketches whose dimensions changed through expressions. */
+const solveSketch: SketchSolver = (s) => {
+  if (!solverReady()) return s;
+  const r = solve(s);
+  return r.ok && r.conflicting.length === 0 ? r.sketch : null;
+};
 import { HistoryPanel } from "./ui/HistoryPanel";
 import { PropertiesPanel } from "./ui/PropertiesPanel";
-import { Viewport } from "./viewport/Viewport";
+import { Viewport, type HoverInfo } from "./viewport/Viewport";
 
 type KernelState = "loading" | "ready" | "error";
 
@@ -63,21 +88,32 @@ function useDocument(initial: () => Document) {
       return f.slice(1);
     });
   }, []);
-  return { doc, commit, update, undo, redo, canUndo: past.length > 0, canRedo: future.length > 0 };
+  /** Loads a different document and starts a fresh undo history. */
+  const replace = useCallback((next: Document) => {
+    setDoc(next);
+    setPast([]);
+    setFuture([]);
+  }, []);
+  return { doc, commit, update, replace, undo, redo, canUndo: past.length > 0, canRedo: future.length > 0 };
 }
 
-function download(blob: Blob, name: string) {
-  const url = URL.createObjectURL(blob);
-  const a = Object.assign(document.createElement("a"), { href: url, download: name });
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
 
 export function App() {
   const kernel = useRef<KernelClient | null>(null);
   const [kernelState, setKernelState] = useState<KernelState>("loading");
   const [kernelError, setKernelError] = useState("");
-  const { doc, commit, update, undo, redo, canUndo, canRedo } = useDocument(demoDocument);
+  const [boot] = useState(() => loadAutosave());
+  const { doc, commit: rawCommit, update: rawUpdate, replace, undo, redo, canUndo, canRedo } = useDocument(() => boot?.doc ?? demoDocument());
+  const [fileName, setFileName] = useState(boot?.fileName ?? UNTITLED);
+  const [meta, setMeta] = useState<FileMeta>(boot?.meta ?? newMeta());
+  // The document as last saved to a file; autosaved-only work still counts as unsaved.
+  const [savedDoc, setSavedDoc] = useState<Document | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const dirty = doc !== savedDoc;
+  // Every edit goes through expression resolution so the kernel sees final numbers.
+  const commit = useCallback((next: Document) => rawCommit(resolveDocument(next, solveSketch).doc), [rawCommit]);
+  const update = useCallback((fn: (cur: Document) => Document) => rawUpdate((cur) => resolveDocument(fn(cur), solveSketch).doc), [rawUpdate]);
+  const resolution = useMemo(() => resolveDocument(doc), [doc]);
   const [editingSketchId, setEditingSketchId] = useState<string | null>(null);
   const [solverState, setSolverState] = useState<KernelState>("loading");
   const [newSketchPlane, setNewSketchPlane] = useState<PlaneName>("XY");
@@ -86,7 +122,7 @@ export function App() {
   const [sketchPreviews, setSketchPreviews] = useState<SketchPreview[]>([]);
   const [status, setStatus] = useState<Map<string, FeatureStatus>>(new Map());
   const [evalMs, setEvalMs] = useState<number | null>(null);
-  const [hoverFace, setHoverFace] = useState<number | null>(null);
+  const [hover, setHover] = useState<HoverInfo | null>(null);
 
   useEffect(() => {
     const k = new KernelClient();
@@ -104,9 +140,16 @@ export function App() {
     };
   }, []);
 
+  // Editing a feature that references topology shows the model *before* it,
+  // so its edges/faces can be picked: fillet/chamfer (edges), shell and push/pull (faces).
+  const selectedFeature = doc.features.find((f) => f.id === selectedId) ?? null;
+  const pickingFeature = !editingSketchId && (selectedFeature?.type === "fillet" || selectedFeature?.type === "chamfer") ? selectedFeature : null;
+  const faceFeature = !editingSketchId && (selectedFeature?.type === "shell" || selectedFeature?.type === "pushpull") ? selectedFeature : null;
+  const rollbackId = pickingFeature?.id ?? faceFeature?.id;
+  const [selectedFaces, setSelectedFaces] = useState<string[]>([]);
   useEffect(() => {
-    kernel.current?.evaluate(doc);
-  }, [doc]);
+    kernel.current?.evaluate(doc, rollbackId);
+  }, [doc, rollbackId]);
 
   useEffect(() => {
     loadSolver().then(
@@ -129,10 +172,16 @@ export function App() {
   const selected = doc.features.find((f) => f.id === selectedId) ?? null;
   const sketches = useMemo(() => doc.features.filter((f): f is SketchFeature => f.type === "sketch"), [doc]);
   const baseSketch = selected?.type === "sketch" ? selected : lastSketch(doc);
-  const errors = [...status.values()].filter((s) => !s.ok);
+  // Kernel status plus expression errors, which take precedence.
+  const fullStatus = useMemo(() => {
+    const m = new Map(status);
+    for (const [id, error] of resolution.featureErrors) m.set(id, { id, ok: false, error });
+    return m;
+  }, [status, resolution]);
+  const errors = [...fullStatus.values()].filter((s) => !s.ok);
 
   const add = (f: Feature) => {
-    commit({ features: [...doc.features, f] });
+    commit({ ...doc, features: [...doc.features, f] });
     setSelectedId(f.id);
   };
 
@@ -142,30 +191,165 @@ export function App() {
     setSelectedId(id);
     setEditingSketchId(id);
   };
+  // Faces picked in the viewport that still exist in the displayed mesh, and whether they're planar.
+  const faceInfo = useMemo(() => new Map((mesh?.faceNames ?? []).map((n, i) => [n, mesh!.facePlanar[i]] as const)), [mesh]);
+  const liveFaces = selectedFaces.filter((n) => faceInfo.has(n));
+  const singlePlanarFace = liveFaces.length === 1 && faceInfo.get(liveFaces[0]) ? liveFaces[0] : null;
+
   const newSketch = () => {
-    const f = makeSketch(doc, newSketchPlane);
+    // With one planar face selected, sketch on it; otherwise on the chosen standard plane.
+    const f = singlePlanarFace ? makeSketchOnFace(doc, singlePlanarFace) : makeSketch(doc, newSketchPlane);
     add(f);
+    setSelectedFaces([]);
     startSketchEdit(f.id);
   };
 
-  const exportAs = async (format: "step" | "stl") => {
+  const onPickFace = (name: string | null, additive: boolean) => {
+    if (faceFeature?.type === "shell") {
+      if (!name) return;
+      const faces = faceFeature.faces.includes(name) ? faceFeature.faces.filter((n) => n !== name) : [...faceFeature.faces, name];
+      commit(updateFeature(doc, faceFeature.id, { faces }));
+      return;
+    }
+    if (faceFeature?.type === "pushpull") {
+      if (name && faceInfo.get(name)) commit(updateFeature(doc, faceFeature.id, { face: name }));
+      else if (name) flash("Push/Pull needs a planar face");
+      return;
+    }
+    if (!name) return setSelectedFaces([]);
+    setSelectedFaces((cur) => (additive ? (cur.includes(name) ? cur.filter((n) => n !== name) : [...cur, name]) : cur.length === 1 && cur[0] === name ? [] : [name]));
+    if (selectedFeature) setSelectedId(null);
+  };
+
+  const importFile = () => {
+    const input = Object.assign(document.createElement("input"), { type: "file", accept: ".step,.stp,.stl" });
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const format = /\.stl$/i.test(file.name) ? "stl" : "step";
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let bin = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      add(makeImport(file.name, format, btoa(bin), hasBody(doc) ? "join" : "new"));
+      flash(`Imported ${file.name}`);
+    };
+    input.click();
+  };
+
+  const flash = (msg: string) => {
+    setNotice(msg);
+    setTimeout(() => setNotice((n) => (n === msg ? null : n)), 4000);
+  };
+
+  const exportAs = async (format: ExportFormat) => {
+    const k = kernel.current!;
+    const info = EXPORT_FORMATS.find((f) => f.id === format)!;
+    const name = baseName(fileName);
     try {
-      const blob = await kernel.current!.export(doc, format);
-      download(blob, `model.${format}`);
+      const blob = format === "step" ? await k.exportSTEP(doc) : await exportMesh(await k.exportMesh(doc), format, name);
+      downloadBlob(blob, `${name}.${info.ext}`);
+      flash(`Exported ${name}.${info.ext}`);
     } catch (e) {
-      alert(`Export failed: ${e instanceof Error ? e.message : e}`);
+      flash(`Export failed: ${e instanceof Error ? e.message : e}`);
     }
   };
+
+  // ---- file commands ----------------------------------------------------------
+  const confirmDiscard = () => !dirty || window.confirm("Discard unsaved changes?");
+
+  const newDocument = () => {
+    if (!confirmDiscard()) return;
+    replace({ variables: [], features: [] });
+    setFileName(UNTITLED);
+    setMeta(newMeta());
+    setSavedDoc(null);
+    setSelectedId(null);
+    setEditingSketchId(null);
+    resetFileHandle();
+  };
+
+  const open = async () => {
+    if (!confirmDiscard()) return;
+    try {
+      const r = await openDocument();
+      if (!r) return;
+      const resolved = resolveDocument(r.doc, solveSketch).doc;
+      replace(resolved);
+      setSavedDoc(resolved);
+      setFileName(r.fileName);
+      setMeta(r.meta);
+      setSelectedId(null);
+      setEditingSketchId(null);
+      flash(`Opened ${r.fileName}`);
+    } catch (e) {
+      flash(`Can't open file: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const save = async (saveAs = false) => {
+    const m = { ...meta, modified: new Date().toISOString(), generator: GENERATOR };
+    try {
+      const name = await saveDocument(doc, m, fileName, saveAs);
+      if (!name) return;
+      setMeta(m);
+      setFileName(name);
+      setSavedDoc(doc);
+      flash(`Saved ${name}`);
+    } catch (e) {
+      flash(`Save failed: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  // Autosave to the browser so a reload never loses work.
+  useEffect(() => {
+    const t = setTimeout(() => writeAutosave(doc, { ...meta, modified: new Date().toISOString() }, fileName), 400);
+    return () => clearTimeout(t);
+  }, [doc, meta, fileName]);
+
+  useEffect(() => {
+    document.title = `${dirty ? "• " : ""}${baseName(fileName)} – OpenShape`;
+  }, [dirty, fileName]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const k = e.key.toLowerCase();
+      if (k === "s") {
+        e.preventDefault();
+        save(e.shiftKey);
+      } else if (k === "o") {
+        e.preventDefault();
+        open();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
 
   return (
     <div className="app">
       <header className="toolbar">
         <strong className="brand">OpenShape</strong>
+        <div className="group file-group">
+          <button onClick={newDocument} title="New document">New</button>
+          <button onClick={open} title="Open (⌘O)">Open</button>
+          <button onClick={() => save(false)} title="Save (⌘S)">Save</button>
+          <button onClick={() => save(true)} title="Save as (⇧⌘S)">Save as</button>
+          <span className="doc-name" title={dirty ? "Unsaved changes (autosaved in this browser)" : "Saved"}>
+            {baseName(fileName)}
+            {dirty && <span className="dirty">•</span>}
+          </span>
+        </div>
         <div className="group">
-          <button disabled={solverState !== "ready" || !!editingSketch} onClick={newSketch} title="New sketch on the chosen plane">
-            ✎ Sketch
+          <button
+            disabled={solverState !== "ready" || !!editingSketch}
+            onClick={newSketch}
+            title={singlePlanarFace ? "New sketch on the selected face" : "New sketch on the chosen plane (select a planar face to sketch on it)"}
+          >
+            {singlePlanarFace ? "✎ Sketch on face" : "✎ Sketch"}
           </button>
-          <select value={newSketchPlane} onChange={(e) => setNewSketchPlane(e.target.value as PlaneName)} disabled={!!editingSketch} title="Sketch plane">
+          <select value={newSketchPlane} onChange={(e) => setNewSketchPlane(e.target.value as PlaneName)} disabled={!!editingSketch || !!singlePlanarFace} title="Sketch plane">
             <option value="XY">XY (top)</option>
             <option value="XZ">XZ (front)</option>
             <option value="YZ">YZ (right)</option>
@@ -181,19 +365,63 @@ export function App() {
           <button disabled={!hasBody(doc)} onClick={() => add(makeEdgeTreatment(doc, "fillet"))}>◜ Fillet</button>
           <button disabled={!hasBody(doc)} onClick={() => add(makeEdgeTreatment(doc, "chamfer"))}>◸ Chamfer</button>
         </div>
+        <div className={`group${editingSketch ? " hidden" : ""}`}>
+          <button
+            disabled={!singlePlanarFace}
+            title="Move the selected planar face along its normal"
+            onClick={() => {
+              add(makePushPull(doc, singlePlanarFace!));
+              setSelectedFaces([]);
+            }}
+          >
+            ⇕ Push/Pull
+          </button>
+          <button
+            disabled={!hasBody(doc)}
+            title="Hollow the body; selected faces become openings"
+            onClick={() => {
+              add(makeShell(doc, liveFaces));
+              setSelectedFaces([]);
+            }}
+          >
+            ▢ Shell
+          </button>
+          <button disabled={!hasBody(doc)} onClick={() => add(makeMirror(doc))} title="Mirror the body across a plane">
+            ⇋ Mirror
+          </button>
+          <button disabled={!hasBody(doc)} onClick={() => add(makePattern(doc))} title="Repeat the body (linear or circular)">
+            ⁘ Pattern
+          </button>
+          <button onClick={importFile} title="Import a STEP or STL file">
+            ⇩ Import
+          </button>
+        </div>
         <div className="group">
           <button disabled={!canUndo} onClick={undo} title="⌘Z">↶</button>
           <button disabled={!canRedo} onClick={redo} title="⇧⌘Z">↷</button>
         </div>
         <div className="group right">
-          <button disabled={kernelState !== "ready" || !mesh} onClick={() => exportAs("step")}>STEP</button>
-          <button disabled={kernelState !== "ready" || !mesh} onClick={() => exportAs("stl")}>STL</button>
+          <select
+            className="export-select"
+            value=""
+            disabled={kernelState !== "ready" || !mesh}
+            onChange={(e) => e.target.value && exportAs(e.target.value as ExportFormat)}
+            title="Export the current body"
+          >
+            <option value="">Export…</option>
+            {EXPORT_FORMATS.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.label} – {f.hint}
+              </option>
+            ))}
+          </select>
         </div>
       </header>
 
+      <div className="sidebar">
       <HistoryPanel
         features={doc.features}
-        status={status}
+        status={fullStatus}
         selectedId={selectedId}
         onSelect={setSelectedId}
         onEdit={(id) => doc.features.find((f) => f.id === id)?.type === "sketch" && startSketchEdit(id)}
@@ -207,20 +435,50 @@ export function App() {
         }}
       />
 
+        <VariablesPanel
+          variables={doc.variables}
+          errors={resolution.variableErrors}
+          scope={resolution.scope}
+          onChange={(variables) => update((cur) => ({ ...cur, variables }))}
+        />
+      </div>
+
       <main className="stage">
         <Viewport
           mesh={mesh}
           sketches={sketchPreviews}
           selectedSketchId={selected?.type === "sketch" ? selected.id : null}
-          onHoverFace={setHoverFace}
+          onHover={setHover}
+          pickEdges={!!pickingFeature}
+          selectedEdges={pickingFeature?.edges ?? []}
+          onPickEdge={(name) => {
+            if (!pickingFeature) return;
+            const has = pickingFeature.edges.includes(name);
+            const edges = has ? pickingFeature.edges.filter((e) => e !== name) : [...pickingFeature.edges, name];
+            commit(updateFeature(doc, pickingFeature.id, { edges }));
+          }}
+          selectedFaces={faceFeature?.type === "shell" ? faceFeature.faces : faceFeature?.type === "pushpull" ? [faceFeature.face] : liveFaces}
+          onPickFace={onPickFace}
         />
         {editingSketch && (
           <SketchEditor
             key={editingSketch.id}
             feature={editingSketch}
+            scope={resolution.scope}
+            reference={sketchPreviews.find((p) => p.id === editingSketch.id)?.reference}
             onCommit={(sketch) => update((cur) => updateFeature(cur, editingSketch.id, { sketch }))}
             onExit={() => setEditingSketchId(null)}
           />
+        )}
+        {pickingFeature && (
+          <div className="overlay picking-banner">
+            Click edges to {pickingFeature.type} · showing the model before <strong>{pickingFeature.name}</strong>
+          </div>
+        )}
+        {faceFeature && (
+          <div className="overlay picking-banner">
+            {faceFeature.type === "shell" ? "Click faces to open" : "Click the planar face to move"} · showing the model before <strong>{faceFeature.name}</strong>
+          </div>
         )}
         {kernelState === "loading" && <div className="overlay">Loading OpenCascade kernel…</div>}
         {kernelState === "error" && <div className="overlay error-msg">Kernel unavailable: {kernelError}</div>}
@@ -229,7 +487,8 @@ export function App() {
       <PropertiesPanel
         feature={selected}
         sketches={sketches}
-        status={selected ? status.get(selected.id) : undefined}
+        status={selected ? fullStatus.get(selected.id) : undefined}
+        scope={resolution.scope}
         onChange={(patch) => selected && commit(updateFeature(doc, selected.id, patch))}
         onEditSketch={startSketchEdit}
         canEditSketch={solverState === "ready" && !editingSketch}
@@ -239,8 +498,11 @@ export function App() {
         <span>Kernel: {kernelState}</span>
         <span>Solver: {solverState}</span>
         {evalMs != null && <span>Rebuild: {evalMs.toFixed(0)} ms</span>}
-        <span>Face: {hoverFace == null ? "—" : `#${hoverFace + 1}`}</span>
+        <span className="topo-name" title="Persistent topological name">
+          {hover?.edge ? `Edge ${hover.edge}` : hover?.face ? `Face ${hover.face}` : "—"}
+        </span>
         {errors.length > 0 && <span className="error-msg">{errors.length} errors in history</span>}
+        {notice && <span className="notice">{notice}</span>}
       </footer>
     </div>
   );

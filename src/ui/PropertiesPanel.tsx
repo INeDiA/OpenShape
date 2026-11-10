@@ -1,5 +1,7 @@
 import type { BooleanOp, Feature, FeatureStatus, PlaneName, SketchFeature } from "../model/types";
+import type { Scope } from "../expr/expr";
 import { isDimension } from "../sketch/model";
+import { ExprInput } from "./ExprInput";
 import { findLoops } from "../sketch/profiles";
 
 interface Props {
@@ -9,20 +11,25 @@ interface Props {
   onChange: (patch: Partial<Feature>) => void;
   onEditSketch: (id: string) => void;
   canEditSketch: boolean;
+  scope: Scope;
 }
 
-function Num({ label, value, onChange, step = 1, min }: { label: string; value: number; onChange: (v: number) => void; step?: number; min?: number }) {
+/** Numeric feature parameter that accepts expressions; stores the source in feature.exprs. */
+function Field({ label, feature, field, scope, onChange, min }: { label: string; feature: Feature; field: string; scope: Scope; onChange: (patch: Partial<Feature>) => void; min?: number }) {
+  const value = (feature as unknown as Record<string, number>)[field];
   return (
     <label className="field">
       <span>{label}</span>
-      <input
-        type="number"
+      <ExprInput
         value={value}
-        step={step}
+        expr={feature.exprs?.[field]}
+        scope={scope}
         min={min}
-        onChange={(e) => {
-          const v = e.target.valueAsNumber;
-          if (Number.isFinite(v)) onChange(v);
+        onCommit={({ value: v, expr }) => {
+          const exprs = { ...feature.exprs };
+          if (expr) exprs[field] = expr;
+          else delete exprs[field];
+          onChange({ [field]: v, exprs } as Partial<Feature>);
         }}
       />
     </label>
@@ -56,7 +63,7 @@ const PLANES: [PlaneName, string][] = [
   ["YZ", "YZ (right)"],
 ];
 
-export function PropertiesPanel({ feature: f, sketches, status, onChange, onEditSketch, canEditSketch }: Props) {
+export function PropertiesPanel({ feature: f, sketches, status, onChange, onEditSketch, canEditSketch, scope }: Props) {
   if (!f) {
     return (
       <aside className="panel props">
@@ -73,8 +80,14 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
 
       {f.type === "sketch" && (
         <>
-          <Select label="Plane" value={f.plane} options={PLANES} onChange={(plane) => onChange({ plane })} />
-          <Num label="Plane offset" value={f.offset} onChange={(offset) => onChange({ offset })} />
+          {f.face ? (
+            <p className="muted">
+              On face <code title={f.face}>{shortName(f.face)}</code>. It follows the face when upstream features change.
+            </p>
+          ) : (
+            <Select label="Plane" value={f.plane} options={PLANES} onChange={(plane) => onChange({ plane })} />
+          )}
+          <Field label="Plane offset" feature={f} field="offset" scope={scope} onChange={onChange} />
           <button className="wide" disabled={!canEditSketch} onClick={() => onEditSketch(f.id)}>
             ✎ Edit sketch
           </button>
@@ -92,7 +105,7 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
           />
           <Select label="Operation" value={f.op} options={OPS} onChange={(op) => onChange({ op })} />
           {f.type === "extrude" ? (
-            <Num label="Distance" value={f.distance} onChange={(distance) => onChange({ distance })} />
+            <Field label="Distance" feature={f} field="distance" scope={scope} onChange={onChange} />
           ) : (
             <>
               <Select
@@ -101,16 +114,76 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
                 options={[["X", "X"], ["Y", "Y"], ["Z", "Z"]]}
                 onChange={(axis) => onChange({ axis })}
               />
-              <Num label="Angle °" value={f.angle} min={1} onChange={(angle) => onChange({ angle })} />
+              <Field label="Angle °" feature={f} field="angle" scope={scope} min={0.01} onChange={onChange} />
             </>
           )}
         </>
       )}
 
+      {f.type === "pushpull" && (
+        <>
+          <Field label="Distance" feature={f} field="distance" scope={scope} onChange={onChange} />
+          <p className="muted">
+            Face <code title={f.face}>{shortName(f.face)}</code>. Positive adds material, negative removes it. Click another planar face to change it.
+          </p>
+        </>
+      )}
+
+      {f.type === "shell" && (
+        <>
+          <Field label="Thickness" feature={f} field="thickness" scope={scope} min={0.001} onChange={onChange} />
+          <p>
+            <strong>{f.faces.length} open face{f.faces.length === 1 ? "" : "s"}</strong>
+          </p>
+          <p className="muted">Click faces in the viewport to open or close them.</p>
+        </>
+      )}
+
+      {f.type === "mirror" && (
+        <>
+          <Select label="Plane" value={f.plane} options={PLANES} onChange={(plane) => onChange({ plane })} />
+          <Field label="Plane offset" feature={f} field="offset" scope={scope} onChange={onChange} />
+        </>
+      )}
+
+      {f.type === "pattern" && (
+        <>
+          <Select label="Type" value={f.mode} options={[["linear", "Linear"], ["circular", "Circular"]]} onChange={(mode) => onChange({ mode })} />
+          <Select label="Axis" value={f.axis} options={[["X", "X"], ["Y", "Y"], ["Z", "Z"]]} onChange={(axis) => onChange({ axis })} />
+          <Field label="Count" feature={f} field="count" scope={scope} min={2} onChange={onChange} />
+          {f.mode === "linear" ? (
+            <Field label="Spacing" feature={f} field="spacing" scope={scope} onChange={onChange} />
+          ) : (
+            <Field label="Angle °" feature={f} field="angle" scope={scope} onChange={onChange} />
+          )}
+          {f.mode === "circular" && <p className="muted">360° spreads the copies evenly around the axis through the origin.</p>}
+        </>
+      )}
+
+      {f.type === "import" && (
+        <>
+          <p>
+            <strong>{f.fileName}</strong> ({f.format.toUpperCase()}, {Math.round((f.data.length * 0.75) / 1024)} KB)
+          </p>
+          <Select label="Operation" value={f.op} options={OPS} onChange={(op) => onChange({ op })} />
+          <p className="muted">The file is embedded in the document.</p>
+        </>
+      )}
+
       {(f.type === "fillet" || f.type === "chamfer") && (
         <>
-          <Num label={f.type === "fillet" ? "Radius" : "Distance"} value={f.size} min={0.1} step={0.5} onChange={(size) => onChange({ size })} />
-          <p className="muted">Applied to all edges. Edge selection coming next.</p>
+          <Field label={f.type === "fillet" ? "Radius" : "Distance"} feature={f} field="size" scope={scope} min={0.001} onChange={onChange} />
+          <div className="edge-pick">
+            <p>
+              {f.edges.length === 0 ? <strong>All edges</strong> : <strong>{f.edges.length} edge{f.edges.length === 1 ? "" : "s"} selected</strong>}
+            </p>
+            <p className="muted">Click edges in the viewport to choose them. References use persistent names, so they survive upstream changes.</p>
+            {f.edges.length > 0 && (
+              <button className="wide" onClick={() => onChange({ edges: [] })}>
+                Use all edges
+              </button>
+            )}
+          </div>
         </>
       )}
     </aside>
@@ -140,4 +213,9 @@ function SketchSummary({ feature }: { feature: SketchFeature }) {
       <p className="muted">Double-click the sketch in the history to edit it.</p>
     </div>
   );
+}
+
+/** Readable tail of a persistent name, e.g. "…:end". */
+function shortName(n: string) {
+  return n.length > 28 ? `…${n.slice(-26)}` : n;
 }

@@ -24,7 +24,8 @@ export function classify(s: SketchData, ids: Iterable<string>): Selected {
     const e = m.get(id);
     if (e?.kind === "point") out.points.push(id);
     if (e?.kind === "line") out.lines.push(id);
-    if (e?.kind === "circle") out.circles.push(id);
+    // Arcs behave like circles for constraints (radius, equal, tangent, point on).
+    if (e?.kind === "circle" || e?.kind === "arc") out.circles.push(id);
   }
   return out;
 }
@@ -54,7 +55,7 @@ export function constraintActions(s: SketchData, selection: Iterable<string>): C
     acts.push({ key: "pointOnLine", label: "On line", glyph: "⋯", build: () => [{ kind: "pointOnLine", point: P[0], line: L[0] }] });
     acts.push({ key: "midpoint", label: "Midpoint", glyph: "M", build: () => [{ kind: "midpoint", point: P[0], line: L[0] }] });
   }
-  if (only(1, 0, 1)) acts.push({ key: "pointOnCircle", label: "On circle", glyph: "◌", build: () => [{ kind: "pointOnCircle", point: P[0], circle: C[0] }] });
+  if (only(1, 0, 1)) acts.push({ key: "pointOnCircle", label: "On curve", glyph: "◌", build: () => [{ kind: "pointOnCircle", point: P[0], circle: C[0] }] });
   if (P.length >= 1 && L.length === 0 && C.length === 0) acts.push({ key: "fixed", label: "Fix", glyph: "⚓", shortcut: "f", build: () => P.map((point) => ({ kind: "fixed", point })) });
 
   return acts;

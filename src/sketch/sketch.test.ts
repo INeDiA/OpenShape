@@ -80,11 +80,11 @@ describe("profiles", () => {
     let s = addRectangle(emptySketch(), -20, -15, 20, 15).sketch;
     s = addCircle(s, 0, 0, 5).sketch;
     const { loops, openCurves } = findLoops(s);
-    expect(loops.map((l) => l.kind).sort()).toEqual(["circle", "polygon"]);
+    expect(loops.map((l) => l.kind).sort()).toEqual(["circle", "path"]);
     expect(openCurves).toEqual([]);
     // Circle inside the rectangle becomes a hole.
     const nested = nestLoops(loops);
-    expect(nested[0].loop.kind).toBe("polygon");
+    expect(nested[0].loop.kind).toBe("path");
     expect(nested[1].depth).toBe(1);
   });
 
@@ -104,5 +104,56 @@ describe("actions", () => {
     expect(keys).toEqual(expect.arrayContaining(["parallel", "perpendicular", "equal"]));
     const dim = dimensionFor(r.sketch, [r.ids[0]]);
     expect(dim).toMatchObject({ kind: "length", value: 10 });
+  });
+});
+
+describe("arcs", () => {
+  it("builds a counter-clockwise arc through three points", async () => {
+    const { addArcThrough } = await import("./builders");
+    // Upper half circle from (10,0) to (-10,0) through (0,10).
+    const r = addArcThrough(emptySketch(), { x: 10, y: 0 }, { x: -10, y: 0 }, { x: 0, y: 10 })!;
+    const arc = r.sketch.entities.find((e) => e.id === r.ids[0])!;
+    expect(arc.kind).toBe("arc");
+    if (arc.kind !== "arc") return;
+    expect(arc.radius).toBeCloseTo(10);
+    expect(pointOf(r.sketch, arc.start).x).toBeCloseTo(10); // ccw: starts at the right
+    // Same pick in the other direction swaps the ends, keeping ccw.
+    const back = addArcThrough(emptySketch(), { x: -10, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 10 })!;
+    const arc2 = back.sketch.entities.find((e) => e.id === back.ids[0])!;
+    if (arc2.kind === "arc") expect(pointOf(back.sketch, arc2.start).x).toBeCloseTo(10);
+    expect(addArcThrough(emptySketch(), { x: 0, y: 0 }, { x: 10, y: 0 }, { x: 5, y: 0 })).toBeNull();
+  });
+
+  it("solves arc radius and keeps ends on the arc", async () => {
+    const { addArcThrough } = await import("./builders");
+    let r = addArcThrough(emptySketch(), { x: 10, y: 0 }, { x: -10, y: 0 }, { x: 0, y: 10 })!;
+    const id = r.ids[0];
+    r = addConstraint(r.sketch, { kind: "radius", circle: id, value: 15 });
+    const res = solve(r.sketch);
+    expect(res.ok).toBe(true);
+    const m = entityMap(res.sketch);
+    const arc = m.get(id)!;
+    if (arc.kind !== "arc") throw new Error("not an arc");
+    const c = pointOf(m, arc.center);
+    for (const p of [arc.start, arc.end]) expect(Math.hypot(pointOf(m, p).x - c.x, pointOf(m, p).y - c.y)).toBeCloseTo(15, 5);
+  });
+
+  it("closes a D-shaped profile from a line and an arc", async () => {
+    const { addArcThrough, addLineBetween } = await import("./builders");
+    const a = addArcThrough(emptySketch(), { x: 10, y: 0 }, { x: -10, y: 0 }, { x: 0, y: 10 })!;
+    const arc = a.sketch.entities.find((e) => e.id === a.ids[0]);
+    if (arc?.kind !== "arc") throw new Error("not an arc");
+    const s = addLineBetween(a.sketch, arc.end, arc.start).sketch;
+    const { loops } = findLoops(s);
+    expect(loops).toHaveLength(1);
+    expect(loops[0].kind).toBe("path");
+  });
+
+  it("offers arc constraints", async () => {
+    const { addArcThrough } = await import("./builders");
+    const a = addArcThrough(emptySketch(), { x: 10, y: 0 }, { x: -10, y: 0 }, { x: 0, y: 10 })!;
+    const s = addRectangle(a.sketch, 20, 0, 30, 10);
+    expect(dimensionFor(s.sketch, [a.ids[0]])).toMatchObject({ kind: "radius" });
+    expect(constraintActions(s.sketch, [a.ids[0], s.ids[0]]).map((x) => x.key)).toContain("tangent");
   });
 });

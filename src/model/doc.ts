@@ -5,7 +5,12 @@ import type {
   ExtrudeFeature,
   Feature,
   PlaneName,
+  ImportFeature,
+  MirrorFeature,
+  PatternFeature,
+  PushPullFeature,
   RevolveFeature,
+  ShellFeature,
   SketchFeature,
 } from "./types";
 import { emptySketch, type SketchData } from "../sketch/model";
@@ -63,7 +68,32 @@ export function makeEdgeTreatment(doc: Document, type: "fillet" | "chamfer"): Ed
     name: nextName(doc, type === "fillet" ? "Fillet" : "Chamfer"),
     suppressed: false,
     size: 1,
+    edges: [],
   };
+}
+
+export function makeSketchOnFace(doc: Document, face: string): SketchFeature {
+  return { ...makeSketch(doc, "XY", 0), face };
+}
+
+export function makePushPull(doc: Document, face: string, distance = 10): PushPullFeature {
+  return { type: "pushpull", id: newId("pp"), name: nextName(doc, "Push/Pull"), suppressed: false, face, distance };
+}
+
+export function makeShell(doc: Document, faces: string[]): ShellFeature {
+  return { type: "shell", id: newId("sh"), name: nextName(doc, "Shell"), suppressed: false, faces, thickness: 2 };
+}
+
+export function makeMirror(doc: Document): MirrorFeature {
+  return { type: "mirror", id: newId("mi"), name: nextName(doc, "Mirror"), suppressed: false, plane: "YZ", offset: 0 };
+}
+
+export function makePattern(doc: Document): PatternFeature {
+  return { type: "pattern", id: newId("pa"), name: nextName(doc, "Pattern"), suppressed: false, mode: "linear", axis: "X", count: 3, spacing: 50, angle: 360 };
+}
+
+export function makeImport(fileName: string, format: "step" | "stl", data: string, op: BooleanOp): ImportFeature {
+  return { type: "import", id: newId("im"), name: fileName, suppressed: false, fileName, format, data, op };
 }
 
 /** Latest non-suppressed sketch at or before `index` (defaults to end). */
@@ -76,7 +106,7 @@ export function lastSketch(doc: Document, index = doc.features.length - 1): Sket
 }
 
 export function hasBody(doc: Document) {
-  return doc.features.some((f) => (f.type === "extrude" || f.type === "revolve") && !f.suppressed);
+  return doc.features.some((f) => (f.type === "extrude" || f.type === "revolve" || f.type === "import") && !f.suppressed);
 }
 
 /** Removing a sketch also removes the features that consume it. */
@@ -85,15 +115,15 @@ export function removeFeature(doc: Document, id: string): Document {
   for (const f of doc.features) {
     if ((f.type === "extrude" || f.type === "revolve") && dependents.has(f.sketchId)) dependents.add(f.id);
   }
-  return { features: doc.features.filter((f) => !dependents.has(f.id)) };
+  return { ...doc, features: doc.features.filter((f) => !dependents.has(f.id)) };
 }
 
 export function updateFeature(doc: Document, id: string, patch: Partial<Feature>): Document {
-  return { features: doc.features.map((f) => (f.id === id ? ({ ...f, ...patch } as Feature) : f)) };
+  return { ...doc, features: doc.features.map((f) => (f.id === id ? ({ ...f, ...patch } as Feature) : f)) };
 }
 
 export function demoDocument(): Document {
-  const doc: Document = { features: [] };
+  const doc: Document = { variables: [], features: [] };
 
   // Base plate: 40 x 30 rectangle, dimensioned.
   let base = addRectangle(emptySketch(), -20, -15, 20, 15);

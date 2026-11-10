@@ -3,7 +3,7 @@
 
 import { GcsWrapper, SolveStatus, init_planegcs_module, type SketchPrimitive } from "@salusoft89/planegcs";
 import wasmUrl from "@salusoft89/planegcs/dist/planegcs_dist/planegcs.wasm?url";
-import type { SkCircle, SkConstraint, SkLine, SketchData } from "./model";
+import type { SkArc, SkCircle, SkConstraint, SkLine, SkPoint, SketchData } from "./model";
 import { entityMap } from "./model";
 
 export interface SolveResult {
@@ -48,7 +48,16 @@ function toPrimitives(s: SketchData, drag?: DragTarget[]): SketchPrimitive[] {
   for (const e of s.entities) {
     if (e.kind === "line") out.push({ id: e.id, type: "line", p1_id: e.p1, p2_id: e.p2 });
     if (e.kind === "circle") out.push({ id: e.id, type: "circle", c_id: e.center, radius: e.radius });
+    if (e.kind === "arc") {
+      const c = m.get(e.center) as SkPoint, a = m.get(e.start) as SkPoint, b = m.get(e.end) as SkPoint;
+      const a0 = Math.atan2(a.y - c.y, a.x - c.x);
+      let a1 = Math.atan2(b.y - c.y, b.x - c.x);
+      if (a1 <= a0) a1 += Math.PI * 2;
+      out.push({ id: e.id, type: "arc", c_id: e.center, start_id: e.start, end_id: e.end, radius: Math.hypot(a.x - c.x, a.y - c.y), start_angle: a0, end_angle: a1 });
+    }
   }
+  // Keeps arc end points on the arc's circle, at its start/end angles.
+  for (const e of s.entities) if (e.kind === "arc") out.push({ id: `__rules_${e.id}`, type: "arc_rules", a_id: e.id });
 
   for (const c of s.constraints) {
     const p = constraintPrimitive(c, m);
@@ -78,16 +87,20 @@ function constraintPrimitive(c: SkConstraint, m: ReturnType<typeof entityMap>): 
       return { id, type: "parallel", l1_id: c.a, l2_id: c.b };
     case "perpendicular":
       return { id, type: "perpendicular_ll", l1_id: c.a, l2_id: c.b };
-    case "equal":
-      return m.get(c.a)?.kind === "circle"
-        ? { id, type: "equal_radius_cc", c1_id: c.a, c2_id: c.b }
-        : { id, type: "equal_length", l1_id: c.a, l2_id: c.b };
+    case "equal": {
+      const ka = m.get(c.a)?.kind, kb = m.get(c.b)?.kind;
+      if (ka === "line") return { id, type: "equal_length", l1_id: c.a, l2_id: c.b };
+      if (ka === "circle" && kb === "circle") return { id, type: "equal_radius_cc", c1_id: c.a, c2_id: c.b };
+      if (ka === "arc" && kb === "arc") return { id, type: "equal_radius_aa", a1_id: c.a, a2_id: c.b };
+      // One circle, one arc (in either order).
+      return ka === "circle" ? { id, type: "equal_radius_ca", c1_id: c.a, a2_id: c.b } : { id, type: "equal_radius_ca", c1_id: c.b, a2_id: c.a };
+    }
     case "pointOnLine":
       return { id, type: "point_on_line_pl", p_id: c.point, l_id: c.line };
     case "pointOnCircle":
-      return { id, type: "point_on_circle", p_id: c.point, c_id: c.circle };
+      return m.get(c.circle)?.kind === "arc" ? { id, type: "point_on_arc", p_id: c.point, a_id: c.circle } : { id, type: "point_on_circle", p_id: c.point, c_id: c.circle };
     case "tangent":
-      return { id, type: "tangent_lc", l_id: c.line, c_id: c.circle };
+      return m.get(c.circle)?.kind === "arc" ? { id, type: "tangent_la", l_id: c.line, a_id: c.circle } : { id, type: "tangent_lc", l_id: c.line, c_id: c.circle };
     case "midpoint": {
       const l = m.get(c.line) as SkLine;
       return { id, type: "p2p_symmetric_ppp", p1_id: l.p1, p2_id: l.p2, p_id: c.point };
@@ -99,7 +112,7 @@ function constraintPrimitive(c: SkConstraint, m: ReturnType<typeof entityMap>): 
       return { id, type: "p2p_distance", p1_id: l.p1, p2_id: l.p2, distance: c.value };
     }
     case "radius":
-      return { id, type: "circle_radius", c_id: c.circle, radius: c.value };
+      return m.get(c.circle)?.kind === "arc" ? { id, type: "arc_radius", a_id: c.circle, radius: c.value } : { id, type: "circle_radius", c_id: c.circle, radius: c.value };
     case "angle":
       return { id, type: "l2l_angle_ll", l1_id: c.a, l2_id: c.b, angle: (c.value * Math.PI) / 180 };
   }
@@ -125,7 +138,7 @@ export function solve(s: SketchData, drag?: DragTarget[]): SolveResult {
     const p = solved.get(e.id) as Record<string, unknown> | undefined;
     if (!p) return e;
     if (e.kind === "point") return { ...e, x: p.x as number, y: p.y as number };
-    if (e.kind === "circle") return { ...e, radius: Math.abs(p.radius as number) } as SkCircle;
+    if (e.kind === "circle" || e.kind === "arc") return { ...e, radius: Math.abs(p.radius as number) } as SkCircle | SkArc;
     return e;
   });
   return { sketch: { ...s, entities }, ok, dof, conflicting, redundant };

@@ -5,33 +5,37 @@ import type { SketchData } from "../sketch/model";
 
 export type PlaneName = "XY" | "XZ" | "YZ";
 
-export interface SketchFeature {
-  type: "sketch";
+/** Fields shared by every feature. */
+interface FeatureBase {
   id: string;
   name: string;
   suppressed: boolean;
+  /** Numeric fields driven by an expression, e.g. { distance: "height / 2" }. */
+  exprs?: Partial<Record<string, string>>;
+}
+
+export interface SketchFeature extends FeatureBase {
+  type: "sketch";
+  /** Standard plane; ignored when `face` is set. */
   plane: PlaneName;
+  /** Persistent name of a planar face to sketch on (see kernel/naming.ts). */
+  face?: string;
+  /** Distance along the plane normal. */
   offset: number;
   sketch: SketchData;
 }
 
 export type BooleanOp = "new" | "join" | "cut" | "intersect";
 
-export interface ExtrudeFeature {
+export interface ExtrudeFeature extends FeatureBase {
   type: "extrude";
-  id: string;
-  name: string;
-  suppressed: boolean;
   sketchId: string;
   distance: number;
   op: BooleanOp;
 }
 
-export interface RevolveFeature {
+export interface RevolveFeature extends FeatureBase {
   type: "revolve";
-  id: string;
-  name: string;
-  suppressed: boolean;
   sketchId: string;
   /** Axis in the sketch plane's global frame. */
   axis: "X" | "Y" | "Z";
@@ -39,18 +43,79 @@ export interface RevolveFeature {
   op: BooleanOp;
 }
 
-export interface EdgeTreatmentFeature {
+export interface EdgeTreatmentFeature extends FeatureBase {
   type: "fillet" | "chamfer";
-  id: string;
-  name: string;
-  suppressed: boolean;
-  /** Applied to every edge of the current body (edge picking comes later). */
   size: number;
+  /** Persistent edge names to treat (see kernel/naming.ts); empty means every edge. */
+  edges: string[];
 }
 
-export type Feature = SketchFeature | ExtrudeFeature | RevolveFeature | EdgeTreatmentFeature;
+/** Moves a planar face along its normal: positive adds material, negative removes it. */
+export interface PushPullFeature extends FeatureBase {
+  type: "pushpull";
+  face: string;
+  distance: number;
+}
+
+/** Hollows the body; `faces` are removed to open it (empty = closed hollow). */
+export interface ShellFeature extends FeatureBase {
+  type: "shell";
+  faces: string[];
+  thickness: number;
+}
+
+/** Mirrors the body across a standard plane and joins the copy. */
+export interface MirrorFeature extends FeatureBase {
+  type: "mirror";
+  plane: PlaneName;
+  offset: number;
+}
+
+/** Repeats the body: linear along an axis or circular around it, joined. */
+export interface PatternFeature extends FeatureBase {
+  type: "pattern";
+  mode: "linear" | "circular";
+  axis: "X" | "Y" | "Z";
+  /** Total number of instances, including the original. */
+  count: number;
+  /** Linear: distance between instances (mm). */
+  spacing: number;
+  /** Circular: total angle covered (degrees); 360 spreads instances evenly. */
+  angle: number;
+}
+
+/** A solid imported from a STEP or STL file, embedded in the document. */
+export interface ImportFeature extends FeatureBase {
+  type: "import";
+  fileName: string;
+  format: "step" | "stl";
+  /** File content, base64. */
+  data: string;
+  op: BooleanOp;
+}
+
+export type Feature =
+  | SketchFeature
+  | ExtrudeFeature
+  | RevolveFeature
+  | EdgeTreatmentFeature
+  | PushPullFeature
+  | ShellFeature
+  | MirrorFeature
+  | PatternFeature
+  | ImportFeature;
+
+export interface Variable {
+  id: string;
+  name: string;
+  /** Expression source; may reference earlier or later variables (no cycles). */
+  expr: string;
+  /** Last computed value, cached so the document is usable without re-evaluating. */
+  value: number;
+}
 
 export interface Document {
+  variables: Variable[];
   features: Feature[];
 }
 
@@ -61,7 +126,15 @@ export interface MeshData {
   normals: Float32Array;
   triangles: Uint32Array;
   faceGroups: { start: number; count: number; faceId: number }[];
+  /** Persistent name of each face group (same order as faceGroups). */
+  faceNames: string[];
+  /** Whether each face is planar (sketch on face, push/pull). */
+  facePlanar: boolean[];
   edges: Float32Array;
+  /** Ranges of `edges` vertices (pairs) per kernel edge. */
+  edgeGroups: { start: number; count: number; edgeId: number }[];
+  /** Persistent name of each edge group. */
+  edgeNames: string[];
 }
 
 export interface FeatureStatus {
@@ -74,11 +147,13 @@ export interface SketchPreview {
   id: string;
   /** Line segment pairs in world space, flattened xyz (for THREE.LineSegments). */
   segments: Float32Array;
+  /** For sketches on a face: the face's edges as 2D segment pairs in sketch coordinates. */
+  reference?: Float32Array;
 }
 
 export type KernelRequest =
-  | { kind: "evaluate"; seq: number; doc: Document }
-  | { kind: "export"; seq: number; doc: Document; format: "step" | "stl" };
+  | { kind: "evaluate"; seq: number; doc: Document; stopBefore?: string }
+  | { kind: "export"; seq: number; doc: Document; format: "step" | "mesh" };
 
 export type KernelResponse =
   | { kind: "ready" }
@@ -91,4 +166,4 @@ export type KernelResponse =
       status: FeatureStatus[];
       ms: number;
     }
-  | { kind: "exported"; seq: number; blob: Blob | null; error?: string };
+  | { kind: "exported"; seq: number; blob?: Blob; mesh?: { vertices: Float32Array; triangles: Uint32Array }; error?: string };

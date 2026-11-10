@@ -24,7 +24,18 @@ export interface SkCircle {
   construction?: boolean;
 }
 
-export type SkCurve = SkLine | SkCircle;
+/** Circular arc from `start` to `end`, counter-clockwise around `center`. */
+export interface SkArc {
+  id: string;
+  kind: "arc";
+  center: string;
+  start: string;
+  end: string;
+  radius: number;
+  construction?: boolean;
+}
+
+export type SkCurve = SkLine | SkCircle | SkArc;
 export type SkEntity = SkPoint | SkCurve;
 
 export type SkConstraint =
@@ -37,10 +48,10 @@ export type SkConstraint =
   | { id: string; kind: "pointOnCircle"; point: string; circle: string }
   | { id: string; kind: "tangent"; line: string; circle: string }
   | { id: string; kind: "midpoint"; point: string; line: string }
-  | { id: string; kind: "distance"; a: string; b: string; value: number } // point-point
-  | { id: string; kind: "length"; line: string; value: number }
-  | { id: string; kind: "radius"; circle: string; value: number }
-  | { id: string; kind: "angle"; a: string; b: string; value: number }; // degrees, line-line
+  | { id: string; kind: "distance"; a: string; b: string; value: number; expr?: string } // point-point
+  | { id: string; kind: "length"; line: string; value: number; expr?: string }
+  | { id: string; kind: "radius"; circle: string; value: number; expr?: string }
+  | { id: string; kind: "angle"; a: string; b: string; value: number; expr?: string }; // degrees, line-line
 
 export type ConstraintKind = SkConstraint["kind"];
 /** Omit that distributes over union members (plain Omit collapses them). */
@@ -102,7 +113,12 @@ export function constraintRefs(c: SkConstraint): string[] {
 
 /** Points owned by a curve. */
 export function curvePoints(e: SkCurve): string[] {
-  return e.kind === "line" ? [e.p1, e.p2] : [e.center];
+  return e.kind === "line" ? [e.p1, e.p2] : e.kind === "arc" ? [e.center, e.start, e.end] : [e.center];
+}
+
+/** End points of open curves (lines, arcs); circles have none. */
+export function curveEnds(e: SkCurve): [string, string] | null {
+  return e.kind === "line" ? [e.p1, e.p2] : e.kind === "arc" ? [e.start, e.end] : null;
 }
 
 /**

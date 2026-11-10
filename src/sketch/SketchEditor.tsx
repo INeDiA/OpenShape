@@ -1,17 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent, type ReactElement, type WheelEvent as RWheelEvent } from "react";
 import type { SketchFeature } from "../model/types";
 import { constraintActions, CONSTRAINT_GLYPH, dimensionFor } from "./actions";
-import { addCircle, addConstraint, addLineBetween, addPoint, addRectangle } from "./builders";
+import { addArcThrough, addCircle, addConstraint, addLineBetween, addPoint, addRectangle } from "./builders";
+import { arcMidpoint } from "./profiles";
 import { bounds, hitTest, type Hit } from "./geometry";
 import { skId } from "./model";
-import type { NewConstraint, SkCircle, SkConstraint, SkLine, SketchData } from "./model";
+import type { NewConstraint, SkArc, SkCircle, SkConstraint, SkLine, SketchData } from "./model";
 import { entityMap, isDimension, pointOf, removeConstraints, removeEntities } from "./model";
 import { solve, type DragTarget, type SolveResult } from "./solver";
+import { evalExpr, isPlainNumber, type Scope } from "../expr/expr";
 
-type Tool = "select" | "line" | "rect" | "circle";
+type Tool = "select" | "line" | "rect" | "circle" | "arc";
 
 interface Props {
   feature: SketchFeature;
+  scope: Scope;
+  /** Edges of the face being sketched on, as 2D segment pairs (x1, y1, x2, y2). */
+  reference?: Float32Array;
   onCommit: (sketch: SketchData) => void;
   onExit: () => void;
 }
@@ -28,6 +33,7 @@ type Pending =
   | { tool: "line"; from: string | null; x: number; y: number; chainStart: string | null }
   | { tool: "rect"; x: number; y: number }
   | { tool: "circle"; center: string | null; x: number; y: number }
+  | { tool: "arc"; start: string | null; sx: number; sy: number; end?: { id: string | null; x: number; y: number } }
   | null;
 
 interface DragState {
@@ -47,11 +53,11 @@ interface EditState {
 
 const SNAP_PX = 9;
 const AXIS_SNAP_DEG = 4;
-const TOOL_KEYS: Record<string, Tool> = { s: "select", l: "line", r: "rect", c: "circle" };
+const TOOL_KEYS: Record<string, Tool> = { s: "select", l: "line", r: "rect", c: "circle", a: "arc" };
 
 const fmt = (v: number) => (Math.abs(v - Math.round(v)) < 1e-6 ? String(Math.round(v)) : v.toFixed(2));
 
-export function SketchEditor({ feature, onCommit, onExit }: Props) {
+export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
   const [sketch, setSketch] = useState<SketchData>(feature.sketch);
@@ -99,7 +105,12 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
   useEffect(() => {
     if (fitted.current || size.w < 50) return;
     fitted.current = true;
-    const b = bounds(sketch);
+    let b = bounds(sketch);
+    if (reference?.length) {
+      const xs = reference.filter((_, i) => i % 2 === 0), ys = reference.filter((_, i) => i % 2 === 1);
+      const rb = { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+      b = b ? { minX: Math.min(b.minX, rb.minX), maxX: Math.max(b.maxX, rb.maxX), minY: Math.min(b.minY, rb.minY), maxY: Math.max(b.maxY, rb.maxY) } : rb;
+    }
     if (!b) return;
     const w = Math.max(b.maxX - b.minX, 10), h = Math.max(b.maxY - b.minY, 10);
     setView({ cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2, scale: Math.min(size.w / w, size.h / h) * 0.55 });
@@ -135,6 +146,16 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
     return h?.kind === "point" ? h.id : null;
   };
 
+  /** Snaps to a vertex of the reference face, if one is close. */
+  const refSnap = (x: number, y: number): { x: number; y: number } | null => {
+    if (!reference) return null;
+    const tol = SNAP_PX / view.scale;
+    for (let i = 0; i < reference.length; i += 2) {
+      if (Math.hypot(reference[i] - x, reference[i + 1] - y) <= tol) return { x: reference[i], y: reference[i + 1] };
+    }
+    return null;
+  };
+
   /** Free points snap to a 1 mm grid (finer when zoomed in). */
   const gridSnap = (v: number) => {
     const step = view.scale > 20 ? 0.1 : view.scale > 4 ? 1 : 5;
@@ -144,7 +165,8 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
   const pointAt = (s: SketchData, x: number, y: number): { sketch: SketchData; id: string } => {
     const existing = snapPoint(x, y);
     if (existing) return { sketch: s, id: existing };
-    const r = addPoint(s, gridSnap(x), gridSnap(y));
+    const ref = refSnap(x, y);
+    const r = ref ? addPoint(s, ref.x, ref.y) : addPoint(s, gridSnap(x), gridSnap(y));
     return { sketch: r.sketch, id: r.ids[0] };
   };
 
@@ -177,7 +199,7 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
       });
       const m = entityMap(sketch);
       const e = m.get(h.id)!;
-      const ids = e.kind === "point" ? [e.id] : e.kind === "line" ? [e.p1, e.p2] : [e.center];
+      const ids = e.kind === "point" ? [e.id] : e.kind === "line" ? [e.p1, e.p2] : e.kind === "arc" ? [e.center, e.start, e.end] : [e.center];
       drag.current = {
         base: sketch,
         points: ids.map((id) => ({ id, x0: pointOf(m, id).x, y0: pointOf(m, id).y })),
@@ -232,6 +254,25 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
         const r = addRectangle(sketch, Math.min(pending.x, x1), Math.min(pending.y, y1), Math.max(pending.x, x1), Math.max(pending.y, y1));
         apply(r.sketch, "rectangle");
       }
+      setPending(null);
+      return;
+    }
+
+    if (tool === "arc") {
+      const snap = snapPoint(x, y);
+      const at = snap ? pointOf(sketch, snap) : refSnap(x, y) ?? { x: gridSnap(x), y: gridSnap(y) };
+      if (!pending || pending.tool !== "arc") {
+        setPending({ tool: "arc", start: snap, sx: at.x, sy: at.y });
+        return;
+      }
+      if (!pending.end) {
+        if (Math.hypot(at.x - pending.sx, at.y - pending.sy) < 1e-6) return;
+        setPending({ ...pending, end: { id: snap, x: at.x, y: at.y } });
+        return;
+      }
+      const r = addArcThrough(sketch, pending.start ?? { x: pending.sx, y: pending.sy }, pending.end.id ?? { x: pending.end.x, y: pending.end.y }, { x, y });
+      if (r) apply(r.sketch, "arc");
+      else setMessage("The three points are in line: move the cursor off the chord.");
       setPending(null);
       return;
     }
@@ -342,19 +383,27 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
     const c = sketch.constraints.find((x) => x.id === id) ?? null;
     const pos = dimLabelPos.current.get(id);
     if (!pos) return;
-    const value = c && isDimension(c) ? c.value : 0;
-    setEdit({ id, sx: pos[0], sy: pos[1], text: fmt(value) });
+    const text = c && isDimension(c) ? (c.expr ?? fmt(c.value)) : "0";
+    setEdit({ id, sx: pos[0], sy: pos[1], text });
   };
 
   const commitEdit = () => {
     if (!edit) return;
-    const v = Number(edit.text.replace(",", "."));
+    const src = edit.text.trim().replace(",", ".");
     setEdit(null);
-    if (!Number.isFinite(v) || v <= 0) {
-      setMessage("Enter a positive number.");
+    let v: number;
+    try {
+      v = evalExpr(src, scope);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
       return;
     }
-    const constraints = sketch.constraints.map((c) => (c.id === edit.id && isDimension(c) ? { ...c, value: v } : c));
+    if (v <= 0) {
+      setMessage("Dimensions must be positive.");
+      return;
+    }
+    const expr = isPlainNumber(src) ? undefined : src;
+    const constraints = sketch.constraints.map((c) => (c.id === edit.id && isDimension(c) ? { ...c, value: v, expr } : c));
     apply({ ...sketch, constraints }, "dimension");
   };
 
@@ -424,6 +473,17 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
   const dims: ReactElement[] = [];
   const perLine = new Map<string, number>();
   dimLabelPos.current = new Map();
+
+  /** SVG path for a counter-clockwise arc (screen y is flipped, so the sweep flag is 0). */
+  function arcPath(a: SkArc): string {
+    const c = pointOf(m, a.center), s0 = pointOf(m, a.start), s1 = pointOf(m, a.end);
+    const r = Math.hypot(s0.x - c.x, s0.y - c.y);
+    let span = Math.atan2(s1.y - c.y, s1.x - c.x) - Math.atan2(s0.y - c.y, s0.x - c.x);
+    if (span <= 0) span += Math.PI * 2;
+    const [x0, y0] = toScreen(s0.x, s0.y), [x1, y1] = toScreen(s1.x, s1.y);
+    const R = r * view.scale;
+    return `M ${x0} ${y0} A ${R} ${R} 0 ${span > Math.PI ? 1 : 0} 0 ${x1} ${y1}`;
+  }
 
   // Annotations go on the outer side of each line, away from the sketch's center.
   const bb = bounds(sketch);
@@ -509,7 +569,7 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
       case "distance":
       case "radius":
       case "angle": {
-        let sx = 0, sy = 0, text = fmt(c.value);
+        let sx = 0, sy = 0, text = c.expr ? `ƒ ${fmt(c.value)}` : fmt(c.value);
         let leader: ReactElement | null = null;
         if (c.kind === "length" || c.kind === "angle") {
           const l = m.get(c.kind === "length" ? c.line : c.b) as SkLine | undefined;
@@ -517,7 +577,7 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
           const f = lineFrame(l);
           sx = f.mx + f.nx * 38;
           sy = f.my + f.ny * 38;
-          if (c.kind === "angle") text = `${fmt(c.value)}°`;
+          if (c.kind === "angle") text = `${text}°`;
         } else if (c.kind === "distance") {
           const a = pointOf(m, c.a), b = pointOf(m, c.b);
           const [ax, ay] = toScreen(a.x, a.y), [bx, by] = toScreen(b.x, b.y);
@@ -525,14 +585,15 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
           sy = (ay + by) / 2 - 14;
           leader = <line x1={ax} y1={ay} x2={bx} y2={by} className="dim-line" />;
         } else {
-          const k = m.get(c.circle) as SkCircle | undefined;
+          const k = m.get(c.circle) as SkCircle | SkArc | undefined;
           if (!k) break;
           const ctr = pointOf(m, k.center);
           const [cx, cy] = toScreen(ctr.x, ctr.y);
-          const [ex, ey] = toScreen(ctr.x + k.radius * Math.SQRT1_2, ctr.y + k.radius * Math.SQRT1_2);
+          const onCurve = k.kind === "arc" ? arcMidpoint(m, k) : ([ctr.x + k.radius * Math.SQRT1_2, ctr.y + k.radius * Math.SQRT1_2] as const);
+          const [ex, ey] = toScreen(onCurve[0], onCurve[1]);
           sx = ex + 14;
           sy = ey - 10;
-          text = `R${fmt(c.value)}`;
+          text = `R${text}`;
           leader = <line x1={cx} y1={cy} x2={ex} y2={ey} className="dim-line" />;
         }
         dimLabelPos.current.set(c.id, [sx, sy]);
@@ -540,7 +601,7 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
           <g key={c.id}>
             {leader}
             <g
-              className={cls(c.id, "dim")}
+              className={cls(c.id, c.expr ? "dim has-expr" : "dim")}
               transform={`translate(${sx},${sy})`}
               onPointerDown={(e) => {
                 e.stopPropagation();
@@ -591,6 +652,31 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
           </text>
         </g>
       );
+    } else if (pending.tool === "arc") {
+      const [ax, ay] = toScreen(pending.sx, pending.sy);
+      if (!pending.end) {
+        const [bx, by] = toScreen(gridSnap(cursor.x), gridSnap(cursor.y));
+        preview = <line x1={ax} y1={ay} x2={bx} y2={by} className="preview" />;
+      } else {
+        const r = addArcThrough(sketch, { x: pending.sx, y: pending.sy }, { x: pending.end.x, y: pending.end.y }, cursor);
+        const arc = r?.sketch.entities.find((e) => e.id === r.ids[0]) as SkArc | undefined;
+        if (r && arc) {
+          const mm = entityMap(r.sketch);
+          const c = pointOf(mm, arc.center), s0 = pointOf(mm, arc.start), s1 = pointOf(mm, arc.end);
+          let span = Math.atan2(s1.y - c.y, s1.x - c.x) - Math.atan2(s0.y - c.y, s0.x - c.x);
+          if (span <= 0) span += Math.PI * 2;
+          const [x0, y0] = toScreen(s0.x, s0.y), [x1, y1] = toScreen(s1.x, s1.y);
+          const R = arc.radius * view.scale;
+          preview = (
+            <g>
+              <path d={`M ${x0} ${y0} A ${R} ${R} 0 ${span > Math.PI ? 1 : 0} 0 ${x1} ${y1}`} className="preview" />
+              <text x={toScreen(cursor.x, cursor.y)[0] + 10} y={toScreen(cursor.x, cursor.y)[1] - 10} className="preview-label">
+                R{fmt(arc.radius)}
+              </text>
+            </g>
+          );
+        }
+      }
     } else if (pending.tool === "circle") {
       const [cx, cy] = toScreen(pending.x, pending.y);
       const r = Math.hypot(cursor.x - pending.x, cursor.y - pending.y);
@@ -620,7 +706,8 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
       <div className="sketch-bar">
         <strong>{feature.name}</strong>
         <span className="muted">
-          {feature.plane} plane{feature.offset ? ` @ ${feature.offset}` : ""}
+          {feature.face ? "on face" : `${feature.plane} plane`}
+          {feature.offset ? ` @ ${feature.offset}` : ""}
         </span>
         <div className="group">
           {(
@@ -629,6 +716,7 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
               ["line", "╱ Line", "L"],
               ["rect", "▭ Rectangle", "R"],
               ["circle", "◯ Circle", "C"],
+              ["arc", "◠ Arc", "A"],
             ] as const
           ).map(([t, label, key]) => (
             <button key={t} className={tool === t ? "active" : ""} title={`${label} (${key})`} onClick={() => (setTool(t), setPending(null))}>
@@ -647,7 +735,7 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
               ↔ Dimension
             </button>
           )}
-          {[...selection].some((id) => m.get(id)?.kind === "line" || m.get(id)?.kind === "circle") && (
+          {[...selection].some((id) => ["line", "circle", "arc"].includes(m.get(id)?.kind ?? "")) && (
             <button title="Construction (X)" onClick={toggleConstruction}>
               ┄ Construction
             </button>
@@ -675,6 +763,12 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
         onDoubleClick={() => pending?.tool === "line" && setPending(null)}
       >
         {grid}
+        {reference &&
+          Array.from({ length: reference.length / 4 }, (_, i) => {
+            const [ax, ay] = toScreen(reference[i * 4], reference[i * 4 + 1]);
+            const [bx, by] = toScreen(reference[i * 4 + 2], reference[i * 4 + 3]);
+            return <line key={`ref${i}`} x1={ax} y1={ay} x2={bx} y2={by} className="reference" />;
+          })}
         {sketch.entities.map((e) => {
           if (e.kind === "line") {
             const a = pointOf(m, e.p1), b = pointOf(m, e.p2);
@@ -685,6 +779,9 @@ export function SketchEditor({ feature, onCommit, onExit }: Props) {
             const c = pointOf(m, e.center);
             const [cx, cy] = toScreen(c.x, c.y);
             return <circle key={e.id} cx={cx} cy={cy} r={e.radius * view.scale} className={cls(e.id, e.construction ? "curve construction" : "curve")} />;
+          }
+          if (e.kind === "arc") {
+            return <path key={e.id} d={arcPath(e)} className={cls(e.id, e.construction ? "curve construction" : "curve")} />;
           }
           return null;
         })}

@@ -42,8 +42,11 @@ segnalate nella history senza bloccare le altre.
 ## Roadmap
 
 1. ~~Viewport, history parametrica, extrude/revolve/booleane/fillet, export STEP/STL~~
-2. ~~Sketcher 2D interattivo con vincoli (PlaneGCS `@salusoft89/planegcs`)~~: linee, rettangoli, cerchi, 12 vincoli, quote modificabili, trascinamento risolto; mancano archi, ellissi, spline e sketch nella vista 3D
-3. Selezione di facce e spigoli, sketch su faccia, fillet su spigoli scelti
-4. Push/pull diretto sulle facce
-5. Import STEP, salvataggio documento (formato aperto)
-6. Loft, pattern, mirror, shell, drawings 2D
+2. ~~Sketcher 2D con vincoli (PlaneGCS)~~: linee, rettangoli, cerchi, archi a tre punti, 12 vincoli, quote, trascinamento. Mancano ellissi, spline, archi tangenti, sketch nella vista 3D
+3. ~~Variabili ed espressioni~~ in parametri e quote (`width / 2`, `3cm`, `atan2(h, w)`)
+4. ~~File `.openshape`~~ (JSON aperto, [specifica](docs/file-format.md)), autosave nel browser, export STL, 3MF, STEP, OBJ, PLY, glTF
+5. ~~Naming topologico persistente~~ (`src/kernel/naming.ts`): fillet/chamfer su spigoli scelti, riferimenti a facce che sopravvivono alle modifiche a monte
+6. ~~Selezione di facce, sketch su faccia, push/pull~~
+7. ~~Shell, mirror, pattern lineare/circolare, import STEP/STL~~
+8. Più corpi separati, loft/sweep, draft, misure
+9. Disegni 2D, app desktop (Tauri)

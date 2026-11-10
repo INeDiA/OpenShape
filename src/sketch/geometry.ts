@@ -3,7 +3,13 @@
 import type { SkCircle, SkLine, SketchData } from "./model";
 import { entityMap, pointOf } from "./model";
 
-export type Hit = { kind: "point" | "line" | "circle"; id: string };
+export type Hit = { kind: "point" | "line" | "circle" | "arc"; id: string };
+
+/** True when angle `a` lies on the counter-clockwise sweep from a0 to a1. */
+export function angleInArc(a: number, a0: number, a1: number): boolean {
+  const n = (x: number) => ((x % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+  return n(a - a0) <= n(a1 - a0);
+}
 
 export function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
   const dx = bx - ax, dy = by - ay;
@@ -36,10 +42,14 @@ export function hitTest(s: SketchData, x: number, y: number, tol: number, exclud
     } else if (e.kind === "circle") {
       const c = pointOf(m, e.center);
       d = Math.abs(Math.hypot(x - c.x, y - c.y) - e.radius);
+    } else if (e.kind === "arc") {
+      const c = pointOf(m, e.center), s0 = pointOf(m, e.start), s1 = pointOf(m, e.end);
+      const ang = Math.atan2(y - c.y, x - c.x);
+      if (angleInArc(ang, Math.atan2(s0.y - c.y, s0.x - c.x), Math.atan2(s1.y - c.y, s1.x - c.x))) d = Math.abs(Math.hypot(x - c.x, y - c.y) - e.radius);
     }
     if (d <= bestD) {
       bestD = d;
-      best = { kind: e.kind as "line" | "circle", id: e.id };
+      best = { kind: e.kind as "line" | "circle" | "arc", id: e.id };
     }
   }
   return best;
