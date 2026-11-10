@@ -48,5 +48,7 @@ segnalate nella history senza bloccare le altre.
 5. ~~Naming topologico persistente~~ (`src/kernel/naming.ts`): fillet/chamfer su spigoli scelti, riferimenti a facce che sopravvivono alle modifiche a monte
 6. ~~Selezione di facce, sketch su faccia, push/pull~~
 7. ~~Shell, mirror, pattern lineare/circolare, import STEP/STL~~
-8. Più corpi separati, loft/sweep, draft, misure
-9. Disegni 2D, app desktop (Tauri)
+8. ~~Manipolazione diretta~~: selezione di facce, spigoli e corpi (doppio click), freccia per push/pull, maniglia per fillet/chamfer, gizmo per spostare e ruotare, menu contestuale e valore modificabile accanto al modello, anteprima dal vivo
+9. ~~Più corpi separati~~ con feature `transform`
+10. Loft/sweep, draft, misure, viste della camera
+11. Disegni 2D, app desktop (Tauri)

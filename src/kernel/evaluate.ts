@@ -5,7 +5,9 @@ import {
   basicFaceExtrusion,
   draw,
   drawCircle,
+  getOC,
   importSTEP,
+  makeCompound,
   makePolygon,
   makeSolid,
   Plane,
@@ -29,14 +31,19 @@ import {
   type FaceNames,
   type NamedShape,
 } from "./naming";
-import type { BooleanOp, Document, Feature, FeatureStatus, MeshData, SketchFeature, SketchPreview } from "../model/types";
+import type { BodyId, BooleanOp, Document, Feature, FeatureStatus, MeshData, SketchFeature, SketchPreview } from "../model/types";
 import { frameToLocal, frameToWorld, planeFrame, standardFrame, type Frame, type Vec3 } from "../model/frame";
 import { entityMap, pointOf } from "../sketch/model";
 import { arcMidpoint, findLoops, loopPolygon, nestLoops, type Loop } from "../sketch/profiles";
 import { parseSTL } from "../io/stl";
 
 export interface EvaluationResult {
+  /** All bodies combined (a compound when there are several): for display and export. */
   body: NamedShape | null;
+  /** Individual bodies in creation order. */
+  bodies: { id: BodyId; shape: NamedShape }[];
+  /** Face hash (in `body`) -> owning body id. */
+  faceBody: Map<number, BodyId>;
   sketches: SketchPreview[];
   status: FeatureStatus[];
 }
@@ -122,10 +129,30 @@ function faceReference(face: Face, fr: Frame): Float32Array {
 
 // ---- solids --------------------------------------------------------------------------
 
-function combine(body: NamedShape | null, tool: NamedShape, op: BooleanOp, featureId: string): NamedShape {
-  if (op === "new" || !body) return tool;
+function booleanOp(body: NamedShape, tool: NamedShape, op: Exclude<BooleanOp, "new">, featureId: string): NamedShape {
   const shape = op === "join" ? body.shape.fuse(tool.shape) : op === "cut" ? body.shape.cut(tool.shape) : body.shape.intersect(tool.shape);
   return { shape, names: transferNames(shape, [body, tool], () => `${featureId}:new`) };
+}
+
+/**
+ * OCCT can return broken solids instead of failing (e.g. a fillet radius
+ * larger than the faces it joins). Refuse them with a readable message.
+ */
+function ensureValid(shape: Shape3D, what: string): Shape3D {
+  const oc = getOC() as unknown as { BRepCheck_Analyzer: new (s: unknown, geom?: boolean) => { IsValid_2?: () => boolean; IsValid?: () => boolean; delete(): void } };
+  const a = new oc.BRepCheck_Analyzer((shape as unknown as { wrapped: unknown }).wrapped, true);
+  const ok = a.IsValid_2 ? a.IsValid_2() : a.IsValid ? a.IsValid() : true;
+  a.delete();
+  if (!ok) throw new Error(what);
+  return shape;
+}
+
+/** Same face names after a rigid transform (face order is preserved). */
+function keepNames(original: NamedShape, moved: Shape3D): FaceNames {
+  const src = original.shape.faces;
+  const names: FaceNames = new Map();
+  moved.faces.forEach((f, k) => names.set(f.hashCode, original.names.get(src[k]?.hashCode) ?? `?${k}`));
+  return names;
 }
 
 /** Joins transformed copies of the body, each named after its original faces. */
@@ -183,11 +210,48 @@ interface SketchContext {
   frame: Frame;
 }
 
+/** Mutable modeling state while replaying the history. */
+class Bodies {
+  readonly map = new Map<BodyId, NamedShape>();
+  last: BodyId | null = null;
+
+  set(id: BodyId, shape: NamedShape) {
+    this.map.set(id, shape);
+    this.last = id;
+  }
+
+  /** Explicit target, else the most recently touched body. */
+  target(id?: BodyId): { id: BodyId; shape: NamedShape } | null {
+    const key = id && this.map.has(id) ? id : this.last;
+    if (id && !this.map.has(id)) throw new Error("Target body no longer exists");
+    return key ? { id: key, shape: this.map.get(key)! } : null;
+  }
+
+  /** Body that has a face with this persistent name. */
+  withFace(name: string): { id: BodyId; shape: NamedShape } {
+    for (const [id, b] of this.map) for (const n of b.names.values()) if (n === name) return { id, shape: b };
+    throw new Error(`Face "${name}" no longer exists`);
+  }
+
+  /** Body that has an edge with this persistent name (edge names come from its faces). */
+  withEdge(name: string): { id: BodyId; shape: NamedShape } | null {
+    for (const [id, b] of this.map) if (nameEdges(b.shape, b.names).byName.has(name)) return { id, shape: b };
+    return null;
+  }
+
+  /** Combines a new solid with the bodies according to `op`. */
+  add(featureId: string, tool: NamedShape, op: BooleanOp, target?: BodyId) {
+    const t = op === "new" ? null : this.target(target);
+    if (!t) return this.set(featureId, tool);
+    this.set(t.id, booleanOp(t.shape, tool, op as Exclude<BooleanOp, "new">, featureId));
+  }
+}
+
 export async function evaluate(doc: Document, opts: EvaluateOptions = {}): Promise<EvaluationResult> {
   const sketches = new Map<string, SketchContext>();
   const previews: SketchPreview[] = [];
   const status: FeatureStatus[] = [];
-  let body: NamedShape | null = null;
+  const bodies = new Bodies();
 
   for (const f of doc.features) {
     if (f.id === opts.stopBefore) break;
@@ -196,22 +260,28 @@ export async function evaluate(doc: Document, opts: EvaluateOptions = {}): Promi
       continue;
     }
     try {
-      const r = await applyFeature(f, body, sketches, previews);
-      body = r.body;
-      status.push(r.warning ? { id: f.id, ok: false, error: r.warning } : { id: f.id, ok: true });
+      const warning = await applyFeature(f, bodies, sketches, previews);
+      status.push(warning ? { id: f.id, ok: false, error: warning } : { id: f.id, ok: true });
     } catch (e) {
       status.push({ id: f.id, ok: false, error: e instanceof Error ? e.message : String(e) });
     }
   }
-  return { body, sketches: previews, status };
+
+  const list = [...bodies.map].map(([id, shape]) => ({ id, shape }));
+  const faceBody = new Map<number, BodyId>();
+  let body: NamedShape | null = null;
+  if (list.length === 1) body = list[0].shape;
+  else if (list.length > 1) {
+    const names: FaceNames = new Map();
+    for (const b of list) for (const [h, n] of b.shape.names) names.set(h, n);
+    // makeCompound takes ownership of its inputs: pass clones (same TShape, same face hashes).
+    body = { shape: makeCompound(list.map((b) => b.shape.shape.clone())) as unknown as Shape3D, names };
+  }
+  for (const b of list) for (const f of b.shape.shape.faces) faceBody.set(f.hashCode, b.id);
+  return { body, bodies: list, faceBody, sketches: previews, status };
 }
 
-async function applyFeature(
-  f: Feature,
-  body: NamedShape | null,
-  sketches: Map<string, SketchContext>,
-  previews: SketchPreview[],
-): Promise<{ body: NamedShape | null; warning?: string }> {
+async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, SketchContext>, previews: SketchPreview[]): Promise<string | undefined> {
   const sketchOf = (id: string) => {
     const s = sketches.get(id);
     if (!s) throw new Error("Referenced sketch is missing, suppressed or failed");
@@ -221,7 +291,8 @@ async function applyFeature(
   switch (f.type) {
     case "sketch": {
       if (f.face) {
-        const { face, frame } = planarFaceFrame(body, f.face, f.offset);
+        const owner = bodies.withFace(f.face);
+        const { face, frame } = planarFaceFrame(owner.shape, f.face, f.offset);
         sketches.set(f.id, { feature: f, frame });
         previews.push({ id: f.id, segments: sketchSegments(f, frame), reference: faceReference(face, frame) });
       } else {
@@ -229,74 +300,86 @@ async function applyFeature(
         sketches.set(f.id, { feature: f, frame });
         previews.push({ id: f.id, segments: sketchSegments(f, frame) });
       }
-      return { body };
+      return;
     }
 
     case "extrude": {
       const { feature: s, frame } = sketchOf(f.sketchId);
       if (f.distance === 0) throw new Error("Distance cannot be 0");
       const shape = sketchDrawing(s).sketchOnPlane(replicadPlane(frame)).extrude(f.distance) as Shape3D;
-      return { body: combine(body, { shape, names: nameExtrusion(shape, f.id, s, frame, f.distance) }, f.op, f.id) };
+      bodies.add(f.id, { shape, names: nameExtrusion(shape, f.id, s, frame, f.distance) }, f.op, f.target);
+      return;
     }
 
     case "revolve": {
       const { feature: s, frame } = sketchOf(f.sketchId);
       const shape = sketchDrawing(s).sketchOnPlane(replicadPlane(frame)).revolve(AXES[f.axis], { angle: f.angle }) as Shape3D;
-      return { body: combine(body, { shape, names: nameRevolution(shape, f.id) }, f.op, f.id) };
+      bodies.add(f.id, { shape, names: nameRevolution(shape, f.id) }, f.op, f.target);
+      return;
     }
 
     case "fillet":
     case "chamfer": {
-      if (!body) throw new Error("No body to apply it to");
       if (f.size <= 0) throw new Error("Size must be > 0");
+      // The body that owns the selected edges, or the current body for "all edges".
+      const owner = f.edges.length ? f.edges.map((n) => bodies.withEdge(n)).find(Boolean) ?? null : bodies.target();
+      if (!owner) throw new Error(f.edges.length ? `None of the ${f.edges.length} selected edges exist anymore` : "No body to apply it to");
+      const body = owner.shape;
       const edges = nameEdges(body.shape, body.names);
       let selected: Set<number> | null = null;
       let selectedNames: Set<string> | undefined;
       let warning: string | undefined;
       if (f.edges.length) {
         const found = f.edges.filter((n) => edges.byName.has(n));
-        if (!found.length) throw new Error(`None of the ${f.edges.length} selected edges exist anymore`);
         if (found.length < f.edges.length) warning = `${f.edges.length - found.length} of ${f.edges.length} selected edges no longer exist`;
         selectedNames = new Set(found);
         selected = new Set(found.map((n) => edges.byName.get(n)!.hashCode));
       }
       const radius = selected ? (e: Edge) => (selected!.has(e.hashCode) ? f.size : null) : f.size;
-      const shape = f.type === "fillet" ? body.shape.fillet(radius) : body.shape.chamfer(radius);
+      const shape = ensureValid(f.type === "fillet" ? body.shape.fillet(radius) : body.shape.chamfer(radius), `${f.type === "fillet" ? "Radius" : "Distance"} ${f.size} is too large for the selected edges`);
       const names = transferNames(shape, [body], (_face, sample) => `${f.id}:blend:${nearestEdgeName(sample.p, edges, selectedNames)}`);
-      return { body: { shape, names }, warning };
+      bodies.set(owner.id, { shape, names });
+      return warning;
     }
 
     case "pushpull": {
-      if (!body) throw new Error("No body to push or pull");
       if (f.distance === 0) throw new Error("Distance cannot be 0");
+      const owner = bodies.withFace(f.face);
+      const body = owner.shape;
       const { face, point, normal } = planarFaceFrame(body, f.face, 0);
       const edges = nameEdges(body.shape, body.names);
       const faceEdges = new Set(face.edges.map((e) => edges.byHash.get(e.hashCode)!).filter(Boolean));
       const tool = basicFaceExtrusion(face, new Vector([normal[0] * f.distance, normal[1] * f.distance, normal[2] * f.distance])) as Shape3D;
       const named = { shape: tool, names: nameFaceExtrusion(tool, f.id, normal, point, f.distance, edges, faceEdges) };
-      return { body: combine(body, named, f.distance > 0 ? "join" : "cut", f.id) };
+      bodies.set(owner.id, booleanOp(body, named, f.distance > 0 ? "join" : "cut", f.id));
+      return;
     }
 
     case "shell": {
-      if (!body) throw new Error("No body to shell");
       if (f.thickness <= 0) throw new Error("Thickness must be > 0");
       if (!f.faces.length) throw new Error("Select at least one face to open");
+      const owner = bodies.withFace(f.faces[0]);
+      const body = owner.shape;
       const hashes = new Set<number>();
       for (const n of f.faces) hashes.add(faceByName(body, n).hashCode);
       // In replicad a positive thickness hollows inward, keeping the outer dimensions.
-      const shape = body.shape.shell(f.thickness, (finder) => finder.when(({ element }) => hashes.has(element.hashCode)));
-      return { body: { shape, names: transferNames(shape, [body], () => `${f.id}:inner`) } };
+      const shape = ensureValid(body.shape.shell(f.thickness, (finder) => finder.when(({ element }) => hashes.has(element.hashCode))), `Thickness ${f.thickness} is too large for this body`);
+      bodies.set(owner.id, { shape, names: transferNames(shape, [body], () => `${f.id}:inner`) });
+      return;
     }
 
     case "mirror": {
-      if (!body) throw new Error("No body to mirror");
+      const t = bodies.target(f.target);
+      if (!t) throw new Error("No body to mirror");
       const fr = standardFrame(f.plane, f.offset);
-      const copy = body.shape.clone().mirror(f.plane, fr.origin);
-      return { body: joinCopies(body, [copy], f.id) };
+      const copy = t.shape.shape.clone().mirror(f.plane, fr.origin);
+      bodies.set(t.id, joinCopies(t.shape, [copy], f.id));
+      return;
     }
 
     case "pattern": {
-      if (!body) throw new Error("No body to pattern");
+      const t = bodies.target(f.target);
+      if (!t) throw new Error("No body to pattern");
       const n = Math.round(f.count);
       if (n < 2) throw new Error("Count must be at least 2");
       if (n > 200) throw new Error("Count is limited to 200");
@@ -304,25 +387,36 @@ async function applyFeature(
       const copies: Shape3D[] = [];
       for (let k = 1; k < n; k++) {
         if (f.mode === "linear") {
-          copies.push(body.shape.clone().translate([axis[0] * f.spacing * k, axis[1] * f.spacing * k, axis[2] * f.spacing * k]));
+          copies.push(t.shape.shape.clone().translate([axis[0] * f.spacing * k, axis[1] * f.spacing * k, axis[2] * f.spacing * k]));
         } else {
           const step = Math.abs(f.angle) >= 360 ? 360 / n : f.angle / (n - 1);
-          copies.push(body.shape.clone().rotate(step * k, [0, 0, 0], axis));
+          copies.push(t.shape.shape.clone().rotate(step * k, [0, 0, 0], axis));
         }
       }
-      return { body: joinCopies(body, copies, f.id) };
+      bodies.set(t.id, joinCopies(t.shape, copies, f.id));
+      return;
+    }
+
+    case "transform": {
+      const t = bodies.target(f.body);
+      if (!t) throw new Error("Body no longer exists");
+      let shape = t.shape.shape.clone();
+      if (f.angle) shape = shape.rotate(f.angle, [f.pivotX, f.pivotY, f.pivotZ], AXES[f.axis]);
+      if (f.dx || f.dy || f.dz) shape = shape.translate([f.dx, f.dy, f.dz]);
+      bodies.set(t.id, { shape, names: keepNames(t.shape, shape) });
+      return;
     }
 
     case "import": {
       const bytes = base64ToBytes(f.data);
       const shape = f.format === "step" ? asSolid(await importSTEP(new Blob([bytes]))) : stlToSolid(bytes);
-      const names: FaceNames = nameByOrder(shape, `${f.id}:face`);
-      return { body: combine(body, { shape, names }, f.op, f.id) };
+      bodies.add(f.id, { shape, names: nameByOrder(shape, `${f.id}:face`) }, f.op, f.target);
+      return;
     }
   }
 }
 
-export function meshBody(body: NamedShape): MeshData {
+export function meshBody(body: NamedShape, faceBody: Map<number, BodyId> = new Map()): MeshData {
   const m = body.shape.mesh({ tolerance: 0.05, angularTolerance: 15 });
   const e = body.shape.meshEdges({ tolerance: 0.05, angularTolerance: 15 });
   const edgeNaming = nameEdges(body.shape, body.names);
@@ -334,6 +428,7 @@ export function meshBody(body: NamedShape): MeshData {
     faceGroups: m.faceGroups,
     faceNames: m.faceGroups.map((g) => body.names.get(g.faceId) ?? "?"),
     facePlanar: m.faceGroups.map((g) => types.get(g.faceId) === "PLANE"),
+    faceBody: m.faceGroups.map((g) => faceBody.get(g.faceId) ?? ""),
     edges: new Float32Array(e.lines),
     edgeGroups: e.edgeGroups,
     edgeNames: e.edgeGroups.map((g) => edgeNaming.byHash.get(g.edgeId) ?? "?"),

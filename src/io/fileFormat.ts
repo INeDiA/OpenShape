@@ -146,6 +146,11 @@ export function validateDocument(raw: unknown): Document {
         num(f.spacing, `${at}.spacing`);
         num(f.angle, `${at}.angle`);
         break;
+      case "transform":
+        str(f.body, `${at}.body`);
+        for (const k of ["dx", "dy", "dz", "angle", "pivotX", "pivotY", "pivotZ"]) num(f[k], `${at}.${k}`);
+        need(["X", "Y", "Z"].includes(f.axis as string), `${at}.axis is invalid`);
+        break;
       case "import":
         str(f.fileName, `${at}.fileName`);
         need(f.format === "step" || f.format === "stl", `${at}.format is invalid`);
@@ -155,6 +160,7 @@ export function validateDocument(raw: unknown): Document {
       default:
         throw new FileFormatError(`Invalid document: ${at} has unknown type "${String(f.type)}"`);
     }
+    if (f.target !== undefined) str(f.target, `${at}.target`);
     if (typeof f.suppressed !== "boolean") f.suppressed = false;
   }
 

@@ -20,6 +20,7 @@ const ICON: Record<Feature["type"], string> = {
   shell: "▢",
   mirror: "⇋",
   pattern: "⁘",
+  transform: "✥",
   import: "⇩",
 };
 

@@ -27,11 +27,19 @@ export interface SketchFeature extends FeatureBase {
 
 export type BooleanOp = "new" | "join" | "cut" | "intersect";
 
+/**
+ * Bodies are identified by the id of the feature that created them
+ * (an extrude/revolve/import with op "new"). Features that modify a body take
+ * an optional `target`; without it they act on the most recently touched body.
+ */
+export type BodyId = string;
+
 export interface ExtrudeFeature extends FeatureBase {
   type: "extrude";
   sketchId: string;
   distance: number;
   op: BooleanOp;
+  target?: BodyId;
 }
 
 export interface RevolveFeature extends FeatureBase {
@@ -41,6 +49,7 @@ export interface RevolveFeature extends FeatureBase {
   axis: "X" | "Y" | "Z";
   angle: number;
   op: BooleanOp;
+  target?: BodyId;
 }
 
 export interface EdgeTreatmentFeature extends FeatureBase {
@@ -69,6 +78,7 @@ export interface MirrorFeature extends FeatureBase {
   type: "mirror";
   plane: PlaneName;
   offset: number;
+  target?: BodyId;
 }
 
 /** Repeats the body: linear along an axis or circular around it, joined. */
@@ -82,6 +92,21 @@ export interface PatternFeature extends FeatureBase {
   spacing: number;
   /** Circular: total angle covered (degrees); 360 spreads instances evenly. */
   angle: number;
+  target?: BodyId;
+}
+
+/** Moves and/or rotates one body (rotation about an axis through `pivot`, then translation). */
+export interface TransformFeature extends FeatureBase {
+  type: "transform";
+  body: BodyId;
+  dx: number;
+  dy: number;
+  dz: number;
+  axis: "X" | "Y" | "Z";
+  angle: number;
+  pivotX: number;
+  pivotY: number;
+  pivotZ: number;
 }
 
 /** A solid imported from a STEP or STL file, embedded in the document. */
@@ -92,6 +117,7 @@ export interface ImportFeature extends FeatureBase {
   /** File content, base64. */
   data: string;
   op: BooleanOp;
+  target?: BodyId;
 }
 
 export type Feature =
@@ -103,6 +129,7 @@ export type Feature =
   | ShellFeature
   | MirrorFeature
   | PatternFeature
+  | TransformFeature
   | ImportFeature;
 
 export interface Variable {
@@ -130,6 +157,8 @@ export interface MeshData {
   faceNames: string[];
   /** Whether each face is planar (sketch on face, push/pull). */
   facePlanar: boolean[];
+  /** Body each face belongs to. */
+  faceBody: BodyId[];
   edges: Float32Array;
   /** Ranges of `edges` vertices (pairs) per kernel edge. */
   edgeGroups: { start: number; count: number; edgeId: number }[];
@@ -162,6 +191,7 @@ export type KernelResponse =
       kind: "evaluated";
       seq: number;
       mesh: MeshData | null;
+      bodies: { id: BodyId; faces: number }[];
       sketches: SketchPreview[];
       status: FeatureStatus[];
       ms: number;

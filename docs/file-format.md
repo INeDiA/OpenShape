@@ -57,7 +57,7 @@ Every feature has:
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | Unique within the document. Referenced by other features. |
-| `type` | string | `sketch`, `extrude`, `revolve`, `fillet`, `chamfer`, `pushpull`, `shell`, `mirror`, `pattern`, `import` |
+| `type` | string | `sketch`, `extrude`, `revolve`, `fillet`, `chamfer`, `pushpull`, `shell`, `mirror`, `pattern`, `transform`, `import` |
 | `name` | string | Display name. |
 | `suppressed` | boolean | Skipped during replay when true. |
 | `exprs` | object, optional | Maps a numeric field name to an expression, e.g. `{ "distance": "height / 2" }`. The field still holds the last computed number. |
@@ -72,7 +72,18 @@ Type-specific fields:
 - **shell**: `faces` (persistent names of faces to open), `thickness` (inward).
 - **mirror**: `plane` (`"XY"`, `"XZ"`, `"YZ"`), `offset`. The mirrored copy is joined to the body.
 - **pattern**: `mode` (`"linear"` or `"circular"`), `axis` (`"X"`, `"Y"`, `"Z"`), `count` (instances including the original), `spacing` (linear, mm), `angle` (circular, degrees; 360 spreads evenly). Copies are joined.
+- **transform**: `body` (body id), `dx`, `dy`, `dz` (translation, mm), `axis` and `angle` (rotation in degrees about an axis through `pivotX/Y/Z`, applied before the translation).
 - **import**: `fileName`, `format` (`"step"` or `"stl"`), `data` (base64 file content), `op`.
+
+### Bodies
+
+A document can hold several separate solids. A body is identified by the id of
+the feature that created it: an `extrude`, `revolve` or `import` with `op: "new"`.
+`join`, `cut` and `intersect` combine with the body named by the optional
+`target` field, or with the most recently modified body when `target` is absent.
+`mirror` and `pattern` also accept `target`. Features that reference topology
+(`pushpull`, `shell`, `fillet`, `chamfer`, a sketch on a face) act on the body
+that owns the referenced face or edge.
 
 `op` is one of `new`, `join`, `cut`, `intersect` and says how the new solid combines with the current body.
 

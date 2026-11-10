@@ -119,3 +119,71 @@ describe("import", () => {
     }
   });
 });
+
+describe("multiple bodies", () => {
+  function twoBlocks() {
+    const { doc, ex } = block();
+    const s2 = makeSketch(doc, "XY", 0, addRectangle(emptySketch(), 50, -5, 60, 5).sketch);
+    const ex2 = { ...makeExtrude(doc, s2.id, "new"), distance: 10 };
+    doc.features.push(s2, ex2);
+    return { doc, ex, ex2 };
+  }
+
+  it("keeps separate bodies", async () => {
+    const { doc, ex, ex2 } = twoBlocks();
+    const r = await evaluate(doc);
+    expect(r.bodies.map((b) => b.id)).toEqual([ex.id, ex2.id]);
+    expect(r.body!.shape.faces).toHaveLength(12);
+    expect(new Set(r.faceBody.values())).toEqual(new Set([ex.id, ex2.id]));
+  });
+
+  it("modifies the body that owns the face", async () => {
+    const { doc, ex2 } = twoBlocks();
+    const pull: Feature = { ...base, id: newId("pp"), type: "pushpull", face: `${ex2.id}:end`, distance: 15 };
+    const r = await evaluate({ ...doc, features: [...doc.features, pull] });
+    const second = r.bodies.find((b) => b.id === ex2.id)!.shape.shape.boundingBox.bounds;
+    expect(Math.round(second[1][2])).toBe(25);
+    const first = r.bodies[0].shape.shape.boundingBox.bounds;
+    expect(Math.round(first[1][2])).toBe(20); // untouched
+  });
+
+  it("moves and rotates a body keeping its face names", async () => {
+    const { doc, ex2 } = twoBlocks();
+    const before = new Set((await evaluate(doc)).bodies[1].shape.names.values());
+    const move: Feature = { ...base, id: newId("tr"), type: "transform", body: ex2.id, dx: 0, dy: 0, dz: 30, axis: "Z", angle: 90, pivotX: 55, pivotY: 0, pivotZ: 0 };
+    const r = await evaluate({ ...doc, features: [...doc.features, move] });
+    const b = r.bodies[1].shape;
+    expect(new Set(b.names.values())).toEqual(before);
+    const bb = b.shape.boundingBox.bounds;
+    expect(Math.round(bb[0][2])).toBe(30);
+    // A downstream feature still finds the moved face by name.
+    const pull: Feature = { ...base, id: newId("pp"), type: "pushpull", face: `${ex2.id}:end`, distance: 5 };
+    const r2 = await evaluate({ ...doc, features: [...doc.features, move, pull] });
+    expect(r2.status.every((s) => s.ok)).toBe(true);
+    expect(Math.round(r2.bodies[1].shape.shape.boundingBox.bounds[1][2])).toBe(45);
+  });
+
+  it("cuts the targeted body", async () => {
+    const { doc, ex } = twoBlocks();
+    const hole = makeSketch(doc, "XY", 20, addCircle(emptySketch(), 0, 0, 4).sketch);
+    doc.features.push(hole, { ...makeExtrude(doc, hole.id, "cut"), distance: -5, target: ex.id });
+    const r = await evaluate(doc);
+    expect(r.status.every((s) => s.ok)).toBe(true);
+    expect(r.bodies[0].shape.shape.faces.length).toBe(8); // block + hole wall + hole floor
+    expect(r.bodies[1].shape.shape.faces.length).toBe(6);
+  });
+});
+
+describe("validity", () => {
+  it("rejects a fillet radius too large for the edge instead of returning a broken solid", async () => {
+    const { doc, ex } = block();
+    const s = doc.features[0];
+    const bottom = s.type === "sketch" ? s.sketch.entities.find((e) => e.kind === "line")!.id : "";
+    const edge = `[${ex.id}:end|${ex.id}:side:${bottom}]`;
+    const ok: Feature = { ...base, id: newId("fi"), type: "fillet", size: 3, edges: [edge] };
+    expect((await evaluate({ ...doc, features: [...doc.features, ok] })).status.every((x) => x.ok)).toBe(true);
+    const huge: Feature = { ...base, id: newId("fi"), type: "fillet", size: 40, edges: [edge] };
+    const r = await evaluate({ ...doc, features: [...doc.features, huge] });
+    expect(r.status.find((x) => x.id === huge.id)?.ok).toBe(false);
+  });
+});

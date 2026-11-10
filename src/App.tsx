@@ -22,6 +22,7 @@ import { SketchEditor } from "./sketch/SketchEditor";
 import { loadSolver, solve, solverReady } from "./sketch/solver";
 import { resolveDocument, type SketchSolver } from "./model/resolve";
 import { VariablesPanel } from "./ui/VariablesPanel";
+import { useManipulation } from "./ui/useManipulation";
 import { EXPORT_FORMATS, exportMesh, type ExportFormat } from "./io/exporters";
 import type { FileMeta } from "./io/fileFormat";
 import { downloadBlob, GENERATOR, loadAutosave, openDocument, resetFileHandle, saveDocument, writeAutosave } from "./io/storage";
@@ -146,10 +147,28 @@ export function App() {
   const pickingFeature = !editingSketchId && (selectedFeature?.type === "fillet" || selectedFeature?.type === "chamfer") ? selectedFeature : null;
   const faceFeature = !editingSketchId && (selectedFeature?.type === "shell" || selectedFeature?.type === "pushpull") ? selectedFeature : null;
   const rollbackId = pickingFeature?.id ?? faceFeature?.id;
-  const [selectedFaces, setSelectedFaces] = useState<string[]>([]);
+
+  const manip = useManipulation({
+    doc,
+    mesh,
+    scope: resolution.scope,
+    enabled: !editingSketchId && !pickingFeature && !faceFeature,
+    commit: (next) => commit(next),
+    onSketchOnFace: (face) => {
+      const f = makeSketchOnFace(doc, face);
+      add(f);
+      manip.clear();
+      startSketchEdit(f.id);
+    },
+    onAddFeature: (f) => add(f),
+    bodyName: (id) => doc.features.find((f) => f.id === id)?.name ?? "Body",
+  });
+
+  // While a handle is dragged the kernel previews the document with the change applied.
+  const kernelDoc = manip.previewDoc ?? doc;
   useEffect(() => {
-    kernel.current?.evaluate(doc, rollbackId);
-  }, [doc, rollbackId]);
+    kernel.current?.evaluate(kernelDoc, rollbackId);
+  }, [kernelDoc, rollbackId]);
 
   useEffect(() => {
     loadSolver().then(
@@ -191,16 +210,16 @@ export function App() {
     setSelectedId(id);
     setEditingSketchId(id);
   };
-  // Faces picked in the viewport that still exist in the displayed mesh, and whether they're planar.
+  // Faces in the displayed mesh and whether they're planar (used while editing a feature).
   const faceInfo = useMemo(() => new Map((mesh?.faceNames ?? []).map((n, i) => [n, mesh!.facePlanar[i]] as const)), [mesh]);
-  const liveFaces = selectedFaces.filter((n) => faceInfo.has(n));
-  const singlePlanarFace = liveFaces.length === 1 && faceInfo.get(liveFaces[0]) ? liveFaces[0] : null;
+  const liveFaces = manip.selection.faces;
+  const singlePlanarFace = manip.singlePlanarFace;
 
   const newSketch = () => {
     // With one planar face selected, sketch on it; otherwise on the chosen standard plane.
     const f = singlePlanarFace ? makeSketchOnFace(doc, singlePlanarFace) : makeSketch(doc, newSketchPlane);
     add(f);
-    setSelectedFaces([]);
+    manip.clear();
     startSketchEdit(f.id);
   };
 
@@ -216,8 +235,7 @@ export function App() {
       else if (name) flash("Push/Pull needs a planar face");
       return;
     }
-    if (!name) return setSelectedFaces([]);
-    setSelectedFaces((cur) => (additive ? (cur.includes(name) ? cur.filter((n) => n !== name) : [...cur, name]) : cur.length === 1 && cur[0] === name ? [] : [name]));
+    manip.pickFace(name, additive);
     if (selectedFeature) setSelectedId(null);
   };
 
@@ -371,7 +389,7 @@ export function App() {
             title="Move the selected planar face along its normal"
             onClick={() => {
               add(makePushPull(doc, singlePlanarFace!));
-              setSelectedFaces([]);
+              manip.clear();
             }}
           >
             ⇕ Push/Pull
@@ -381,7 +399,7 @@ export function App() {
             title="Hollow the body; selected faces become openings"
             onClick={() => {
               add(makeShell(doc, liveFaces));
-              setSelectedFaces([]);
+              manip.clear();
             }}
           >
             ▢ Shell
@@ -449,16 +467,29 @@ export function App() {
           sketches={sketchPreviews}
           selectedSketchId={selected?.type === "sketch" ? selected.id : null}
           onHover={setHover}
-          pickEdges={!!pickingFeature}
-          selectedEdges={pickingFeature?.edges ?? []}
-          onPickEdge={(name) => {
-            if (!pickingFeature) return;
+          edgesOnly={!!pickingFeature}
+          selectedEdges={pickingFeature?.edges ?? manip.selection.edges}
+          onPickEdge={(name, additive) => {
+            if (!pickingFeature) {
+              manip.pickEdge(name, additive);
+              if (selectedFeature) setSelectedId(null);
+              return;
+            }
             const has = pickingFeature.edges.includes(name);
             const edges = has ? pickingFeature.edges.filter((e) => e !== name) : [...pickingFeature.edges, name];
             commit(updateFeature(doc, pickingFeature.id, { edges }));
           }}
           selectedFaces={faceFeature?.type === "shell" ? faceFeature.faces : faceFeature?.type === "pushpull" ? [faceFeature.face] : liveFaces}
+          selectedBody={manip.selection.body}
           onPickFace={onPickFace}
+          onPickBody={(id) => {
+            if (faceFeature || pickingFeature) return;
+            manip.pickBody(id);
+            if (selectedFeature) setSelectedId(null);
+          }}
+          handles={manip.handles}
+          onHandleDrag={manip.onHandleDrag}
+          overlay={manip.overlay}
         />
         {editingSketch && (
           <SketchEditor
