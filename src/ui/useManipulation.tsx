@@ -193,9 +193,10 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
       return a && dir ? [{ id: "refillet", kind: "arrow", origin: a.p, dir, color: 0xff6b93 }] : [];
     }
     if (live.edges.length) {
+      // Only sharp edges get a handle: a smooth (tangent) edge has nothing to round.
       const a = edgeAnchor(mesh, live.edges[0]);
       const fr = edgeFrame(mesh, live.edges[0]);
-      return a ? [{ id: "fillet", kind: "arrow", origin: a.p, dir: fr?.along ?? a.inward, color: 0xff6b93 }] : [];
+      return a && fr ? [{ id: "fillet", kind: "arrow", origin: a.p, dir: fr.outward, color: 0xff6b93 }] : [];
     }
     if (live.body) {
       const b = bodyBounds(mesh, live.body);
@@ -248,8 +249,8 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     if (id === "fillet") {
       const a = edgeAnchor(mesh, live.edges[0])!;
       const fr = edgeFrame(mesh, live.edges[0]);
-      const f: EdgeTreatmentFeature = { ...makeEdgeTreatment(doc, "fillet"), edges: live.edges, size: 0 };
-      return { handle: id, feature: f, isNew: true, base: 0, value: 0, anchor: a.p, dir: fr?.along ?? a.inward, startMesh: mesh };
+      const f: EdgeTreatmentFeature = { ...makeEdgeTreatment(doc, "fillet"), edges: live.edges.filter((e) => edgeFrame(mesh, e)), size: 0 };
+      return { handle: id, feature: f, isNew: true, base: 0, value: 0, anchor: a.p, dir: fr!.outward, startMesh: mesh };
     }
     // Body gizmo: keep adjusting the transform we just made for this body.
     const b = bodyBounds(mesh, live.body!)!;
@@ -341,6 +342,9 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
           ▢ Shell
         </button>,
       );
+    } else if (live.edges.length && !live.edges.some((e) => edgeFrame(mesh, e))) {
+      anchor = edgeAnchor(mesh, live.edges[0])?.p ?? null;
+      buttons.push(<span key="s" className="ov-hint">smooth edge · nothing to fillet here</span>);
     } else if (live.edges.length) {
       anchor = edgeAnchor(mesh, live.edges[0])?.p ?? null;
       for (const type of ["fillet", "chamfer"] as const) {
@@ -348,7 +352,7 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
           <button
             key={type}
             onClick={() => {
-              const f = { ...makeEdgeTreatment(doc, type), edges: live.edges, size: 2 };
+              const f = { ...makeEdgeTreatment(doc, type), edges: live.edges.filter((e) => edgeFrame(mesh, e)), size: 2 };
               commit({ ...doc, features: [...doc.features, f] });
               setActiveId(f.id);
               setSelection(EMPTY);
@@ -388,14 +392,14 @@ function withoutVariants(o: Record<string, number> | undefined, edge: string): R
 }
 
 /**
- * Handle direction on a fillet face: along one of the faces it joins,
- * perpendicular to the rounded edge. Falls back to the inward normal.
+ * Handle direction on a fillet face: straight out of the solid (the face's
+ * outward normal, perpendicular to the rounded edge). Dragging along it grows the radius.
  */
-function blendDirection(mesh: MeshData, edge: string, blendNormal?: Vec3): Vec3 | null {
-  const fr = edgeFrame(mesh, edge);
-  if (fr) return fr.along;
-  return blendNormal ? [-blendNormal[0], -blendNormal[1], -blendNormal[2]] : null;
+function blendDirection(_mesh: MeshData, _edge: string, blendNormal?: Vec3): Vec3 | null {
+  return blendNormal ?? null;
 }
+
+
 
 const toggle = (list: string[], x: string) => (list.includes(x) ? list.filter((n) => n !== x) : [...list, x]);
 

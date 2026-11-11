@@ -50,5 +50,11 @@ segnalate nella history senza bloccare le altre.
 7. ~~Shell, mirror, pattern lineare/circolare, import STEP/STL~~
 8. ~~Manipolazione diretta~~: selezione di facce, spigoli e corpi (doppio click), freccia per push/pull, maniglia per fillet/chamfer, gizmo per spostare e ruotare, menu contestuale e valore modificabile accanto al modello, anteprima dal vivo
 9. ~~Più corpi separati~~ con feature `transform`
-10. Loft/sweep, draft, misure, viste della camera
-11. Disegni 2D, app desktop (Tauri)
+10. Camera e viste: fit, viste standard, rotazione attorno al cursore, gesture da trackpad
+11. Gestione della history: riordino delle feature, eliminazione in blocco di quelle in errore, undo persistente
+12. Sketch nella vista 3D, archi tangenti, ellissi, spline, trim e offset
+13. Misure: distanza, angolo, area, lunghezza
+14. Raccordi d'angolo con raggi diversi: vertex blend / setback invece dell'intaglio che OCCT produce quando tre raccordi di raggio diverso si incontrano in un vertice
+15. Loft, sweep, draft
+16. Disegni tecnici 2D (viste, quote, export PDF/DXF)
+17. App desktop (Tauri) e repo pubblico con CI

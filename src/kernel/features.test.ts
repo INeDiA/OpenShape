@@ -287,7 +287,7 @@ describe("per-edge fillet radius", () => {
 });
 
 describe("fillet handle direction", () => {
-  it("slides on the face, perpendicular to the edge", async () => {
+  it("is perpendicular to the edge and points out of the solid", async () => {
     const { meshBody } = await import("./evaluate");
     const { edgeFrame } = await import("../viewport/meshGeom");
     const { doc, ex } = block();
@@ -299,6 +299,9 @@ describe("fillet handle direction", () => {
     expect(Math.abs(fr.tangent[0])).toBeCloseTo(1); // edge runs along X
     expect(fr.along[1]).toBeCloseTo(1); // on the top face, away from the front edge (+Y)
     expect(Math.abs(fr.along[2])).toBeCloseTo(0);
+    // The handle itself points out of the solid, between top (+Z) and front (-Y).
+    expect(fr.outward[1]).toBeCloseTo(-Math.SQRT1_2);
+    expect(fr.outward[2]).toBeCloseTo(Math.SQRT1_2);
   });
 });
 

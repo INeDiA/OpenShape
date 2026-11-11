@@ -30,7 +30,7 @@ export function faceAnchor(m: MeshData, faceName: string): { p: Vec3; n: Vec3 } 
  * tangent, and `along` = the direction on face A perpendicular to the edge,
  * pointing away from it (where the fillet's tangent line moves as it grows).
  */
-export function edgeFrame(m: MeshData, edgeName: string): { tangent: Vec3; along: Vec3 } | null {
+export function edgeFrame(m: MeshData, edgeName: string): { tangent: Vec3; along: Vec3; outward: Vec3 } | null {
   const inner = edgeName.replace(/#\d+$/, "").replace(/^\[|\]$/g, "");
   const [a, b] = splitPair(inner);
   const A = a ? faceAnchor(m, a) : null, B = b ? faceAnchor(m, b) : null;
@@ -43,7 +43,9 @@ export function edgeFrame(m: MeshData, edgeName: string): { tangent: Vec3; along
   const tangent = unit(t);
   let along = unit(cross(tangent, nA));
   if (dot(along, nB) > 0) along = [-along[0], -along[1], -along[2]];
-  return { tangent, along };
+  // Out of the solid, between the two faces (perpendicular to the edge as well).
+  const outward = unit([nA[0] + nB[0], nA[1] + nB[1], nA[2] + nB[2]]);
+  return { tangent, along, outward };
 }
 
 /**

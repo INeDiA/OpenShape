@@ -110,6 +110,8 @@ export function App() {
   // The document as last saved to a file; autosaved-only work still counts as unsaved.
   const [savedDoc, setSavedDoc] = useState<Document | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Bumped when a different document is loaded, so the viewport frames it.
+  const [fitKey, setFitKey] = useState(0);
   const dirty = doc !== savedDoc;
   // Every edit goes through expression resolution so the kernel sees final numbers.
   const commit = useCallback((next: Document) => rawCommit(resolveDocument(next, solveSketch).doc), [rawCommit]);
@@ -279,6 +281,7 @@ export function App() {
   const newDocument = () => {
     if (!confirmDiscard()) return;
     replace({ variables: [], features: [] });
+    setFitKey((k) => k + 1);
     setFileName(UNTITLED);
     setMeta(newMeta());
     setSavedDoc(null);
@@ -294,6 +297,7 @@ export function App() {
       if (!r) return;
       const resolved = resolveDocument(r.doc, solveSketch).doc;
       replace(resolved);
+      setFitKey((k) => k + 1);
       setSavedDoc(resolved);
       setFileName(r.fileName);
       setMeta(r.meta);
@@ -492,6 +496,7 @@ export function App() {
           onHandleDrag={manip.onHandleDrag}
           overlay={manip.overlay}
           rigidPreview={manip.rigid}
+          fitKey={fitKey}
           ghost={manip.ghost}
         />
         {editingSketch && (

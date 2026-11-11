@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
@@ -6,6 +6,17 @@ import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import type { MeshData, SketchPreview } from "../model/types";
 import type { Vec3 } from "../model/frame";
+import { CameraNav, type NavMode, type ViewName } from "./navigation";
+
+const NAV_MODE_KEY = "openshape.navMode";
+const readNavMode = (): NavMode => {
+  try {
+    const v = localStorage.getItem(NAV_MODE_KEY);
+    return v === "mouse" || v === "trackpad" ? v : "auto";
+  } catch {
+    return "auto";
+  }
+};
 
 export interface HoverInfo {
   face?: string;
@@ -48,6 +59,8 @@ interface Props {
   rigidPreview: { body: string; matrix: number[] } | null;
   /** Translucent prism showing a push/pull before the kernel result arrives. */
   ghost: { mesh: MeshData; face: string; distance: number } | null;
+  /** Changing this number re-frames the model (new/opened document). */
+  fitKey: number;
 }
 
 const mat = (color: number) => new THREE.MeshStandardMaterial({ color, metalness: 0.1, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
@@ -92,6 +105,10 @@ interface SceneState {
   rigid: { body: string; group: THREE.Group; others: THREE.LineSegments } | null;
   ghost: THREE.Mesh | null;
   dragging: boolean;
+  nav: CameraNav | null;
+  /** Bounds of the current mesh, for fit and standard views. */
+  box: THREE.Box3 | null;
+  fitted: boolean;
 }
 
 export function Viewport(props: Props) {
@@ -139,9 +156,20 @@ export function Viewport(props: Props) {
     const s: SceneState = {
       renderer, scene, camera, controls, model, overlay: overlayGroup, gizmos, handleObjects: [],
       body: null, edgeLines: null, mesh: null, hoveredFace: null, hoveredEdge: null, hoveredHandle: null,
-      selectedFaces: new Set(), selectedBody: null, hiddenBody: null, rigid: null, ghost: null, dragging: false,
+      selectedFaces: new Set(), selectedBody: null, hiddenBody: null, rigid: null, ghost: null, dragging: false, nav: null, box: null, fitted: false,
     };
     state.current = s;
+
+    // Navigation: zoom towards the model point under the cursor.
+    const pickRay = new THREE.Raycaster();
+    const nav = new CameraNav(camera, controls, renderer.domElement, (cx, cy) => {
+      if (!s.body) return null;
+      const r = renderer.domElement.getBoundingClientRect();
+      pickRay.setFromCamera(new THREE.Vector2(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1), camera);
+      return pickRay.intersectObject(s.body)[0]?.point ?? null;
+    });
+    nav.mode = readNavMode();
+    s.nav = nav;
 
     const resize = () => {
       const { clientWidth: w, clientHeight: h } = el;
@@ -324,11 +352,22 @@ export function Viewport(props: Props) {
     canvas.addEventListener("pointerup", onUp);
     canvas.addEventListener("pointerleave", onLeave);
     canvas.addEventListener("dblclick", onDbl);
+    const onWheel = (ev: WheelEvent) => {
+      ev.preventDefault();
+      nav.wheel(ev);
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
 
     const tmp = new THREE.Vector3();
     let raf = 0;
     const loop = () => {
+      nav.update(performance.now());
       controls.update();
+      // Keep depth precision reasonable at any zoom.
+      const d = camera.position.distanceTo(controls.target);
+      camera.near = Math.max(0.01, d / 2000);
+      camera.far = Math.max(1000, d * 50);
+      camera.updateProjectionMatrix();
       // Handles keep a constant on-screen size.
       for (const ho of s.handleObjects) {
         const anchor = ho.handle.kind === "arrow" ? ho.handle.origin : ho.handle.center;
@@ -359,6 +398,7 @@ export function Viewport(props: Props) {
       canvas.removeEventListener("pointerup", onUp);
       canvas.removeEventListener("pointerleave", onLeave);
       canvas.removeEventListener("dblclick", onDbl);
+      canvas.removeEventListener("wheel", onWheel);
       controls.dispose();
       renderer.dispose();
       el.removeChild(canvas);
@@ -374,6 +414,14 @@ export function Viewport(props: Props) {
     s.body = null;
     s.edgeLines = null;
     s.mesh = mesh;
+    if (mesh && mesh.vertices.length) {
+      s.box = new THREE.Box3().setFromBufferAttribute(new THREE.BufferAttribute(mesh.vertices, 3));
+      // Frame the first model shown.
+      if (!s.fitted) {
+        s.fitted = true;
+        s.nav?.fit(s.box, undefined, false);
+      }
+    } else s.box = null;
     s.hoveredFace = s.hoveredEdge = null;
 
     if (mesh) {
@@ -397,6 +445,7 @@ export function Viewport(props: Props) {
       s.model.add(new THREE.LineSegments(lg, sk.id === selectedSketchId ? SKETCH_SEL : SKETCH));
     }
     rebuildOverlay(s, selectedEdges);
+    // selectedEdges handled by its own effect
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mesh, sketches, selectedSketchId]);
 
@@ -416,6 +465,11 @@ export function Viewport(props: Props) {
     const s = state.current;
     if (s) buildHandles(s, handles);
   }, [handles]);
+
+  // A new or opened document: frame it as soon as its mesh arrives.
+  useEffect(() => {
+    if (state.current && props.fitKey) state.current.fitted = false;
+  }, [props.fitKey]);
 
   // Rigid preview: build the moved body's geometry once, then only update its matrix.
   useEffect(() => {
@@ -465,6 +519,7 @@ export function Viewport(props: Props) {
   return (
     <div className="viewport-wrap">
       <div ref={host} className={`viewport${props.edgesOnly ? " picking" : ""}`} />
+      <ViewBar state={state} />
       <div ref={overlayRef} className="model-overlay" style={{ display: "none" }}>
         {overlay?.content}
       </div>
@@ -643,4 +698,65 @@ function ghostPrism(m: MeshData, face: string, distance: number): THREE.BufferGe
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
   return geo;
+}
+
+// ---- view toolbar ------------------------------------------------------------------
+
+const VIEWS: [ViewName, string, string][] = [
+  ["top", "Top", "7"],
+  ["front", "Front", "1"],
+  ["right", "Right", "3"],
+  ["iso", "Iso", "0"],
+];
+const MODE_LABEL: Record<NavMode, string> = { auto: "Auto", mouse: "Mouse", trackpad: "Trackpad" };
+const MODE_HINT: Record<NavMode, string> = {
+  auto: "Detects mouse or trackpad from the scroll gesture",
+  mouse: "Wheel zooms",
+  trackpad: "Two fingers orbit, shift + two fingers pan, pinch zooms",
+};
+
+function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
+  const [mode, setMode] = useState<NavMode>(readNavMode);
+  const fit = () => state.current?.nav?.fit(state.current.box);
+  const view = (v: ViewName) => state.current?.nav?.view(v, state.current.box);
+
+  useEffect(() => {
+    if (state.current?.nav) state.current.nav.mode = mode;
+    try {
+      localStorage.setItem(NAV_MODE_KEY, mode);
+    } catch {
+      /* per-viewer preference only */
+    }
+  }, [mode, state]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement;
+      if (["INPUT", "SELECT", "TEXTAREA"].includes(el.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (document.querySelector(".sketch-editor")) return; // the sketcher has its own keys
+      if (e.key === "f" || e.key === "F") fit();
+      const v = VIEWS.find(([, , key]) => key === e.key);
+      if (v) view(v[0]);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  return (
+    <div className="view-bar">
+      <button onClick={fit} title="Fit the model (F)">⤢ Fit</button>
+      {VIEWS.map(([v, label, key]) => (
+        <button key={v} onClick={() => view(v)} title={`${label} view (${key})`}>
+          {label}
+        </button>
+      ))}
+      <button
+        className="nav-mode"
+        title={`Navigation: ${MODE_LABEL[mode]} — ${MODE_HINT[mode]}. Click to change.`}
+        onClick={() => setMode(mode === "auto" ? "mouse" : mode === "mouse" ? "trackpad" : "auto")}
+      >
+        {mode === "trackpad" ? "▭" : mode === "mouse" ? "🖱" : "⟳"} {MODE_LABEL[mode]}
+      </button>
+    </div>
+  );
 }
