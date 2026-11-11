@@ -35,7 +35,31 @@ export interface SkArc {
   construction?: boolean;
 }
 
-export type SkCurve = SkLine | SkCircle | SkArc;
+/**
+ * Ellipse given by its center and one end of each axis. The axis points are
+ * ordinary sketch points, so distance dimensions set the radii.
+ */
+export interface SkEllipse {
+  id: string;
+  kind: "ellipse";
+  center: string;
+  /** End of the major axis (sets the size and the rotation). */
+  major: string;
+  /** End of the minor axis (kept perpendicular to the major one by the solver). */
+  minor: string;
+  construction?: boolean;
+}
+
+/** Smooth curve through its points (Catmull-Rom, drawn as cubic Béziers). */
+export interface SkSpline {
+  id: string;
+  kind: "spline";
+  points: string[];
+  closed?: boolean;
+  construction?: boolean;
+}
+
+export type SkCurve = SkLine | SkCircle | SkArc | SkEllipse | SkSpline;
 export type SkEntity = SkPoint | SkCurve;
 
 export type SkConstraint =
@@ -46,8 +70,11 @@ export type SkConstraint =
   | { id: string; kind: "equal"; a: string; b: string } // two lines or two circles
   | { id: string; kind: "pointOnLine"; point: string; line: string }
   | { id: string; kind: "pointOnCircle"; point: string; circle: string }
+  // `line` may also be an arc: then the two arcs are tangent.
   | { id: string; kind: "tangent"; line: string; circle: string }
   | { id: string; kind: "midpoint"; point: string; line: string }
+  // Curves `a` and `b` (lines or arcs) meet at `point` with the same direction; `reversed` when their parametric directions are opposite.
+  | { id: string; kind: "tangentAt"; a: string; b: string; point: string; reversed: boolean }
   | { id: string; kind: "distance"; a: string; b: string; value: number; expr?: string } // point-point
   | { id: string; kind: "length"; line: string; value: number; expr?: string }
   | { id: string; kind: "radius"; circle: string; value: number; expr?: string }
@@ -106,6 +133,8 @@ export function constraintRefs(c: SkConstraint): string[] {
       return [c.point, c.circle];
     case "tangent":
       return [c.line, c.circle];
+    case "tangentAt":
+      return [c.a, c.b, c.point];
     case "radius":
       return [c.circle];
   }
@@ -113,12 +142,26 @@ export function constraintRefs(c: SkConstraint): string[] {
 
 /** Points owned by a curve. */
 export function curvePoints(e: SkCurve): string[] {
-  return e.kind === "line" ? [e.p1, e.p2] : e.kind === "arc" ? [e.center, e.start, e.end] : [e.center];
+  switch (e.kind) {
+    case "line":
+      return [e.p1, e.p2];
+    case "arc":
+      return [e.center, e.start, e.end];
+    case "circle":
+      return [e.center];
+    case "ellipse":
+      return [e.center, e.major, e.minor];
+    case "spline":
+      return [...e.points];
+  }
 }
 
-/** End points of open curves (lines, arcs); circles have none. */
+/** End points of open curves (lines, arcs, open splines); closed curves have none. */
 export function curveEnds(e: SkCurve): [string, string] | null {
-  return e.kind === "line" ? [e.p1, e.p2] : e.kind === "arc" ? [e.start, e.end] : null;
+  if (e.kind === "line") return [e.p1, e.p2];
+  if (e.kind === "arc") return [e.start, e.end];
+  if (e.kind === "spline" && !e.closed) return [e.points[0], e.points[e.points.length - 1]];
+  return null;
 }
 
 /**

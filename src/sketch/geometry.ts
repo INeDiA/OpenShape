@@ -2,8 +2,9 @@
 
 import type { SkCircle, SkLine, SketchData } from "./model";
 import { entityMap, pointOf } from "./model";
+import { curvePolyline, polylineDistance } from "./curves";
 
-export type Hit = { kind: "point" | "line" | "circle" | "arc"; id: string };
+export type Hit = { kind: "point" | "line" | "circle" | "arc" | "ellipse" | "spline"; id: string };
 
 /** True when angle `a` lies on the counter-clockwise sweep from a0 to a1. */
 export function angleInArc(a: number, a0: number, a1: number): boolean {
@@ -46,10 +47,12 @@ export function hitTest(s: SketchData, x: number, y: number, tol: number, exclud
       const c = pointOf(m, e.center), s0 = pointOf(m, e.start), s1 = pointOf(m, e.end);
       const ang = Math.atan2(y - c.y, x - c.x);
       if (angleInArc(ang, Math.atan2(s0.y - c.y, s0.x - c.x), Math.atan2(s1.y - c.y, s1.x - c.x))) d = Math.abs(Math.hypot(x - c.x, y - c.y) - e.radius);
+    } else if (e.kind === "ellipse" || e.kind === "spline") {
+      d = polylineDistance(curvePolyline(m, e, 32), x, y);
     }
     if (d <= bestD) {
       bestD = d;
-      best = { kind: e.kind as "line" | "circle" | "arc", id: e.id };
+      best = { kind: e.kind as Hit["kind"], id: e.id };
     }
   }
   return best;
@@ -77,6 +80,7 @@ export function bounds(s: SketchData): { minX: number; minY: number; maxX: numbe
       add(c.x - e.radius, c.y - e.radius);
       add(c.x + e.radius, c.y + e.radius);
     }
+    if (e.kind === "ellipse" || e.kind === "spline") for (const [x, y] of curvePolyline(m, e, 16)) add(x, y);
   }
   return Number.isFinite(minX) ? { minX, minY, maxX, maxY } : null;
 }

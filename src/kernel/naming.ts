@@ -25,6 +25,7 @@ import type { SketchFeature } from "../model/types";
 import { entityMap, pointOf, type SkCurve } from "../sketch/model";
 import { frameToLocal, type Frame } from "../model/frame";
 import { distToSegment } from "../sketch/geometry";
+import { curvePolyline, polylineDistance } from "../sketch/curves";
 
 export type FaceNames = Map<number, string>; // face hashCode -> name
 
@@ -143,6 +144,7 @@ function curveDistance(m: ReturnType<typeof entityMap>, c: SkCurve, u: number, v
     const a = pointOf(m, c.p1), b = pointOf(m, c.p2);
     return distToSegment(u, v, a.x, a.y, b.x, b.y);
   }
+  if (c.kind === "ellipse" || c.kind === "spline") return polylineDistance(curvePolyline(m, c), u, v);
   const ctr = pointOf(m, c.center);
   const radial = Math.abs(Math.hypot(u - ctr.x, v - ctr.y) - c.radius);
   if (c.kind === "circle") return radial;

@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent, type ReactElement, type WheelEvent as RWheelEvent } from "react";
 import type { SketchFeature } from "../model/types";
 import { constraintActions, CONSTRAINT_GLYPH, dimensionFor } from "./actions";
-import { addArcThrough, addCircle, addConstraint, addLineBetween, addPoint, addRectangle } from "./builders";
+import { addArcThrough, addCircle, addConstraint, addEllipse, addLineBetween, addPoint, addRectangle, addSpline, addTangentArc, exitDirection, tangentArcGeom } from "./builders";
+import { ellipseGeom, splineBeziers, splinePoints, type Pt } from "./curves";
 import { arcMidpoint } from "./profiles";
 import { bounds, hitTest, type Hit } from "./geometry";
 import { skId } from "./model";
-import type { NewConstraint, SkArc, SkCircle, SkConstraint, SkLine, SketchData } from "./model";
-import { entityMap, isDimension, pointOf, removeConstraints, removeEntities } from "./model";
+import type { NewConstraint, SkArc, SkCircle, SkConstraint, SkCurve, SkEllipse, SkLine, SketchData } from "./model";
+import { curvePoints, entityMap, isDimension, pointOf, removeConstraints, removeEntities } from "./model";
 import { solve, type DragTarget, type SolveResult } from "./solver";
 import { evalExpr, isPlainNumber, type Scope } from "../expr/expr";
 
-type Tool = "select" | "line" | "rect" | "circle" | "arc";
+type Tool = "select" | "line" | "rect" | "circle" | "arc" | "tarc" | "ellipse" | "spline";
 
 interface Props {
   feature: SketchFeature;
@@ -34,6 +35,10 @@ type Pending =
   | { tool: "rect"; x: number; y: number }
   | { tool: "circle"; center: string | null; x: number; y: number }
   | { tool: "arc"; start: string | null; sx: number; sy: number; end?: { id: string | null; x: number; y: number } }
+  /** Tangent arc leaving `curve` at its end point `from`. */
+  | { tool: "tarc"; curve: string; from: string }
+  | { tool: "ellipse"; cx: number; cy: number; center: string | null; major?: { x: number; y: number } }
+  | { tool: "spline"; points: { id: string | null; x: number; y: number }[] }
   | null;
 
 interface DragState {
@@ -53,7 +58,16 @@ interface EditState {
 
 const SNAP_PX = 9;
 const AXIS_SNAP_DEG = 4;
-const TOOL_KEYS: Record<string, Tool> = { s: "select", l: "line", r: "rect", c: "circle", a: "arc" };
+const TOOL_KEYS: Record<string, Tool> = { s: "select", l: "line", r: "rect", c: "circle", a: "arc", g: "tarc", o: "ellipse", p: "spline" };
+
+/** The line or arc ending at point `id` that a tangent arc should continue (the newest one). */
+function curveEndingAt(s: SketchData, id: string): string | null {
+  for (let i = s.entities.length - 1; i >= 0; i--) {
+    const e = s.entities[i];
+    if ((e.kind === "line" && (e.p1 === id || e.p2 === id)) || (e.kind === "arc" && (e.start === id || e.end === id))) return e.id;
+  }
+  return null;
+}
 
 const fmt = (v: number) => (Math.abs(v - Math.round(v)) < 1e-6 ? String(Math.round(v)) : v.toFixed(2));
 
@@ -172,6 +186,21 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
 
   const cancelPending = () => setPending(null);
 
+  /** Commits the spline being drawn (needs two points, three when closed). */
+  const finishSpline = (placed: { id: string | null; x: number; y: number }[], closed: boolean) => {
+    setPending(null);
+    if (placed.length < 2) return;
+    let s = sketch;
+    const ids = placed.map((p) => {
+      if (p.id) return p.id;
+      const r = addPoint(s, p.x, p.y);
+      s = r.sketch;
+      return r.ids[0];
+    });
+    const r = addSpline(s, ids, closed);
+    if (r) apply(r.sketch, "spline");
+  };
+
   // ---- pointer handling ----------------------------------------------------
 
   const onPointerDown = (ev: RPointerEvent) => {
@@ -199,7 +228,7 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
       });
       const m = entityMap(sketch);
       const e = m.get(h.id)!;
-      const ids = e.kind === "point" ? [e.id] : e.kind === "line" ? [e.p1, e.p2] : e.kind === "arc" ? [e.center, e.start, e.end] : [e.center];
+      const ids = e.kind === "point" ? [e.id] : curvePoints(e);
       drag.current = {
         base: sketch,
         points: ids.map((id) => ({ id, x0: pointOf(m, id).x, y0: pointOf(m, id).y })),
@@ -274,6 +303,79 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
       if (r) apply(r.sketch, "arc");
       else setMessage("The three points are in line: move the cursor off the chord.");
       setPending(null);
+      return;
+    }
+
+    if (tool === "tarc") {
+      const snap = snapPoint(x, y);
+      if (!pending || pending.tool !== "tarc") {
+        const curve = snap ? curveEndingAt(sketch, snap) : null;
+        if (!snap || !curve) {
+          setMessage("Tangent arc: start from the end of a line or arc.");
+          return;
+        }
+        setMessage(null);
+        setPending({ tool: "tarc", curve, from: snap });
+        return;
+      }
+      const at = refSnap(x, y) ?? { x: gridSnap(x), y: gridSnap(y) };
+      const r = addTangentArc(sketch, pending.curve, pending.from, snap ?? at);
+      if (!r) {
+        setMessage("The end is straight ahead: a tangent arc needs to turn.");
+        return;
+      }
+      if (apply(r.sketch, "tangent arc")) {
+        // Keep going from the new arc's far end, unless the chain closed on an existing point.
+        const arc = r.sketch.entities.find((e) => e.id === r.ids[0]) as SkArc;
+        const far = arc.start === pending.from ? arc.end : arc.start;
+        setPending(snap ? null : { tool: "tarc", curve: arc.id, from: far });
+      }
+      return;
+    }
+
+    if (tool === "ellipse") {
+      if (!pending || pending.tool !== "ellipse") {
+        const c = snapPoint(x, y);
+        const p = c ? pointOf(sketch, c) : { x: gridSnap(x), y: gridSnap(y) };
+        setPending({ tool: "ellipse", cx: p.x, cy: p.y, center: c });
+        return;
+      }
+      if (!pending.major) {
+        const mx = gridSnap(x), my = gridSnap(y);
+        if (Math.hypot(mx - pending.cx, my - pending.cy) < 1e-6) return;
+        setPending({ ...pending, major: { x: mx, y: my } });
+        return;
+      }
+      const b = ellipseMinor(pending.cx, pending.cy, pending.major, x, y);
+      const r = addEllipse(sketch, pending.cx, pending.cy, pending.major.x, pending.major.y, b);
+      if (r) {
+        let next = r.sketch;
+        // Reuse a snapped center point.
+        if (pending.center) {
+          const e = next.entities.find((x) => x.id === r.ids[0]) as SkEllipse;
+          next = addConstraint(next, { kind: "coincident", a: e.center, b: pending.center }).sketch;
+        }
+        apply(next, "ellipse");
+      }
+      setPending(null);
+      return;
+    }
+
+    if (tool === "spline") {
+      const snap = snapPoint(x, y);
+      const at = snap ? pointOf(sketch, snap) : refSnap(x, y) ?? { x: gridSnap(x), y: gridSnap(y) };
+      const placed = pending?.tool === "spline" ? pending.points : [];
+      const last = placed[placed.length - 1];
+      // Clicking the last point again (or double clicking) finishes; the first point closes it.
+      if (last && Math.hypot(at.x - last.x, at.y - last.y) * view.scale < 4) {
+        finishSpline(placed, false);
+        return;
+      }
+      if (placed.length >= 3 && Math.hypot(at.x - placed[0].x, at.y - placed[0].y) * view.scale < SNAP_PX) {
+        finishSpline(placed, true);
+        return;
+      }
+      setPending({ tool: "spline", points: [...placed, { id: snap, x: at.x, y: at.y }] });
       return;
     }
 
@@ -412,6 +514,10 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
       if (edit || (e.target as HTMLElement).tagName === "INPUT") return;
       if (e.metaKey || e.ctrlKey) return;
       const k = e.key.toLowerCase();
+      if ((k === "escape" || k === "enter") && pending?.tool === "spline") {
+        finishSpline(pending.points, false);
+        return;
+      }
       if (k === "escape") {
         if (pending) cancelPending();
         else if (selection.size) setSelection(new Set());
@@ -484,6 +590,26 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
     const R = r * view.scale;
     return `M ${x0} ${y0} A ${R} ${R} 0 ${span > Math.PI ? 1 : 0} 0 ${x1} ${y1}`;
   }
+
+  /** SVG path of an ellipse or spline (Béziers map exactly under the screen transform). */
+  function curvePath(e: Extract<SkCurve, { kind: "ellipse" | "spline" }>, mm = m): string {
+    if (e.kind === "ellipse") {
+      const g = ellipseGeom(mm, e);
+      return ellipseSvg(g.cx, g.cy, g.a, g.b, g.angle);
+    }
+    return splineSvg(splinePoints(mm, e), !!e.closed);
+  }
+  const ellipseSvg = (cx: number, cy: number, a: number, b: number, angle: number) => {
+    const ca = Math.cos(angle), sa = Math.sin(angle);
+    const [x0, y0] = toScreen(cx + a * ca, cy + a * sa), [x1, y1] = toScreen(cx - a * ca, cy - a * sa);
+    const A = a * view.scale, B = b * view.scale, deg = (-angle * 180) / Math.PI;
+    return `M ${x0} ${y0} A ${A} ${B} ${deg} 1 0 ${x1} ${y1} A ${A} ${B} ${deg} 1 0 ${x0} ${y0} Z`;
+  };
+  const splineSvg = (pts: Pt[], closed: boolean) => {
+    if (pts.length < 2) return "";
+    const sc = (p: Pt) => toScreen(p[0], p[1]).join(" ");
+    return `M ${sc(pts[0])} ` + splineBeziers(pts, closed).map((b) => `C ${sc(b.c1)} ${sc(b.c2)} ${sc(b.to)}`).join(" ") + (closed ? " Z" : "");
+  };
 
   // Annotations go on the outer side of each line, away from the sketch's center.
   const bb = bounds(sketch);
@@ -563,6 +689,7 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
       case "pointOnLine":
       case "pointOnCircle":
       case "midpoint":
+      case "tangentAt":
         glyphAtPoint(c, c.point, g);
         break;
       case "length":
@@ -677,6 +804,69 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
           );
         }
       }
+    } else if (pending.tool === "tarc") {
+      const from = pointOf(m, pending.from);
+      const dir = exitDirection(sketch, pending.curve, pending.from);
+      const snap = snapPoint(cursor.x, cursor.y);
+      const end = snap ? pointOf(m, snap) : { x: gridSnap(cursor.x), y: gridSnap(cursor.y) };
+      const g = dir && tangentArcGeom(from, dir, end);
+      const [ex, ey] = toScreen(end.x, end.y);
+      if (g) {
+        const [x0, y0] = toScreen(from.x, from.y);
+        // Sweep from `from` to `end` turning the way the tangent goes.
+        const a0 = Math.atan2(from.y - g.cy, from.x - g.cx), a1 = Math.atan2(end.y - g.cy, end.x - g.cx);
+        let span = g.ccw ? a1 - a0 : a0 - a1;
+        span = ((span % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+        const R = g.radius * view.scale;
+        preview = (
+          <g>
+            <path d={`M ${x0} ${y0} A ${R} ${R} 0 ${span > Math.PI ? 1 : 0} ${g.ccw ? 0 : 1} ${ex} ${ey}`} className="preview" />
+            <text x={ex + 10} y={ey - 10} className="preview-label">
+              R{fmt(g.radius)}
+            </text>
+          </g>
+        );
+      }
+    } else if (pending.tool === "ellipse") {
+      const [cx, cy] = toScreen(pending.cx, pending.cy);
+      if (!pending.major) {
+        const [bx, by] = toScreen(gridSnap(cursor.x), gridSnap(cursor.y));
+        preview = (
+          <g>
+            <line x1={cx} y1={cy} x2={bx} y2={by} className="preview" />
+            <text x={bx + 10} y={by - 10} className="preview-label">
+              {fmt(Math.hypot(gridSnap(cursor.x) - pending.cx, gridSnap(cursor.y) - pending.cy))}
+            </text>
+          </g>
+        );
+      } else {
+        const a = Math.hypot(pending.major.x - pending.cx, pending.major.y - pending.cy);
+        const b = ellipseMinor(pending.cx, pending.cy, pending.major, cursor.x, cursor.y);
+        const angle = Math.atan2(pending.major.y - pending.cy, pending.major.x - pending.cx);
+        const [qx, qy] = toScreen(cursor.x, cursor.y);
+        preview =
+          b > 1e-6 ? (
+            <g>
+              <path d={ellipseSvg(pending.cx, pending.cy, a, b, angle)} className="preview" />
+              <text x={qx + 10} y={qy - 10} className="preview-label">
+                {fmt(a)} × {fmt(b)}
+              </text>
+            </g>
+          ) : null;
+      }
+    } else if (pending.tool === "spline") {
+      const snap = snapPoint(cursor.x, cursor.y);
+      const c = snap ? pointOf(m, snap) : { x: gridSnap(cursor.x), y: gridSnap(cursor.y) };
+      const pts: Pt[] = [...pending.points.map((p) => [p.x, p.y] as Pt), [c.x, c.y]];
+      preview = (
+        <g>
+          <path d={splineSvg(pts, false)} className="preview" />
+          {pending.points.map((p, i) => {
+            const [px, py] = toScreen(p.x, p.y);
+            return <circle key={i} cx={px} cy={py} r={3.5} className="pt" />;
+          })}
+        </g>
+      );
     } else if (pending.tool === "circle") {
       const [cx, cy] = toScreen(pending.x, pending.y);
       const r = Math.hypot(cursor.x - pending.x, cursor.y - pending.y);
@@ -717,6 +907,9 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
               ["rect", "▭ Rectangle", "R"],
               ["circle", "◯ Circle", "C"],
               ["arc", "◠ Arc", "A"],
+              ["tarc", "◡ Tangent arc", "G"],
+              ["ellipse", "⬭ Ellipse", "O"],
+              ["spline", "∿ Spline", "P"],
             ] as const
           ).map(([t, label, key]) => (
             <button key={t} className={tool === t ? "active" : ""} title={`${label} (${key})`} onClick={() => (setTool(t), setPending(null))}>
@@ -735,7 +928,7 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
               ↔ Dimension
             </button>
           )}
-          {[...selection].some((id) => ["line", "circle", "arc"].includes(m.get(id)?.kind ?? "")) && (
+          {[...selection].some((id) => ["line", "circle", "arc", "ellipse", "spline"].includes(m.get(id)?.kind ?? "")) && (
             <button title="Construction (X)" onClick={toggleConstruction}>
               ┄ Construction
             </button>
@@ -760,7 +953,9 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
         onPointerLeave={() => setHover(null)}
         onWheel={onWheel}
         onContextMenu={(e) => e.preventDefault()}
-        onDoubleClick={() => pending?.tool === "line" && setPending(null)}
+        onDoubleClick={() => {
+          if (pending?.tool === "line") setPending(null);
+        }}
       >
         {grid}
         {reference &&
@@ -782,6 +977,9 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
           }
           if (e.kind === "arc") {
             return <path key={e.id} d={arcPath(e)} className={cls(e.id, e.construction ? "curve construction" : "curve")} />;
+          }
+          if (e.kind === "ellipse" || e.kind === "spline") {
+            return <path key={e.id} d={curvePath(e)} className={cls(e.id, e.construction ? "curve construction" : "curve")} />;
           }
           return null;
         })}
@@ -841,4 +1039,11 @@ function Glyph({ id, x, y, text, cls, onSelect }: { id: string; x: number; y: nu
       </text>
     </g>
   );
+}
+
+/** Minor radius from the cursor: its distance to the major axis line. */
+function ellipseMinor(cx: number, cy: number, major: { x: number; y: number }, x: number, y: number): number {
+  const a = Math.hypot(major.x - cx, major.y - cy) || 1;
+  const ux = (major.x - cx) / a, uy = (major.y - cy) / a;
+  return Math.abs(-(x - cx) * uy + (y - cy) * ux);
 }

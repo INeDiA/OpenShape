@@ -83,6 +83,7 @@ export const CONSTRAINT_GLYPH: Record<string, string> = {
   perpendicular: "⊥",
   equal: "=",
   tangent: "T",
+  tangentAt: "T",
   pointOnLine: "⋯",
   pointOnCircle: "◌",
   midpoint: "M",

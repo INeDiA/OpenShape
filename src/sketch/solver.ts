@@ -59,6 +59,24 @@ function toPrimitives(s: SketchData, drag?: DragTarget[]): SketchPrimitive[] {
   // Keeps arc end points on the arc's circle, at its start/end angles.
   for (const e of s.entities) if (e.kind === "arc") out.push({ id: `__rules_${e.id}`, type: "arc_rules", a_id: e.id });
 
+  // Ellipses: planegcs wants a focus and a minor radius. Hidden helper points
+  // (the focus and the opposite axis ends) tie them to our axis points.
+  for (const e of s.entities) {
+    if (e.kind !== "ellipse") continue;
+    const c = m.get(e.center) as SkPoint, ma = m.get(e.major) as SkPoint, mi = m.get(e.minor) as SkPoint;
+    const a = Math.hypot(ma.x - c.x, ma.y - c.y), b = Math.hypot(mi.x - c.x, mi.y - c.y);
+    const ux = (ma.x - c.x) / (a || 1), uy = (ma.y - c.y) / (a || 1);
+    const f = Math.sqrt(Math.max(a * a - b * b, 1e-9));
+    const h = (k: string) => `__${k}_${e.id}`;
+    out.push({ id: h("f"), type: "point", x: c.x + ux * f, y: c.y + uy * f, fixed: false });
+    out.push({ id: h("ma"), type: "point", x: 2 * c.x - ma.x, y: 2 * c.y - ma.y, fixed: false });
+    out.push({ id: h("mi"), type: "point", x: 2 * c.x - mi.x, y: 2 * c.y - mi.y, fixed: false });
+    out.push({ id: e.id, type: "ellipse", c_id: e.center, focus1_id: h("f"), radmin: b });
+    out.push({ id: h("af"), type: "internal_alignment_ellipse_focus1", e_id: e.id, p1_id: h("f") });
+    out.push({ id: h("aM"), type: "internal_alignment_ellipse_major_diameter", e_id: e.id, p1_id: e.major, p2_id: h("ma") });
+    out.push({ id: h("am"), type: "internal_alignment_ellipse_minor_diameter", e_id: e.id, p1_id: e.minor, p2_id: h("mi") });
+  }
+
   for (const c of s.constraints) {
     const p = constraintPrimitive(c, m);
     if (p) out.push(p);
@@ -99,8 +117,14 @@ function constraintPrimitive(c: SkConstraint, m: ReturnType<typeof entityMap>): 
       return { id, type: "point_on_line_pl", p_id: c.point, l_id: c.line };
     case "pointOnCircle":
       return m.get(c.circle)?.kind === "arc" ? { id, type: "point_on_arc", p_id: c.point, a_id: c.circle } : { id, type: "point_on_circle", p_id: c.point, c_id: c.circle };
-    case "tangent":
-      return m.get(c.circle)?.kind === "arc" ? { id, type: "tangent_la", l_id: c.line, a_id: c.circle } : { id, type: "tangent_lc", l_id: c.line, c_id: c.circle };
+    case "tangent": {
+      const first = m.get(c.line)?.kind, second = m.get(c.circle)?.kind;
+      if (first === "arc" && second === "arc") return { id, type: "tangent_aa", a1_id: c.line, a2_id: c.circle };
+      if (first === "arc") return { id, type: "tangent_ca", c_id: c.circle, a_id: c.line };
+      return second === "arc" ? { id, type: "tangent_la", l_id: c.line, a_id: c.circle } : { id, type: "tangent_lc", l_id: c.line, c_id: c.circle };
+    }
+    case "tangentAt":
+      return { id, type: "angle_via_point", crv1_id: c.a, crv2_id: c.b, p_id: c.point, angle: c.reversed ? Math.PI : 0 };
     case "midpoint": {
       const l = m.get(c.line) as SkLine;
       return { id, type: "p2p_symmetric_ppp", p1_id: l.p1, p2_id: l.p2, p_id: c.point };

@@ -5,6 +5,7 @@ import {
   basicFaceExtrusion,
   draw,
   drawCircle,
+  drawEllipse,
   getOC,
   importSTEP,
   makeCompound,
@@ -33,6 +34,7 @@ import {
 import type { BodyId, BooleanOp, Document, Feature, FeatureStatus, MeshData, SketchFeature, SketchPreview } from "../model/types";
 import { frameToLocal, frameToWorld, planeFrame, standardFrame, type Frame, type Vec3 } from "../model/frame";
 import { entityMap, pointOf } from "../sketch/model";
+import { curvePolyline } from "../sketch/curves";
 import { arcMidpoint, findLoops, loopPolygon, nestLoops, type Loop } from "../sketch/profiles";
 import { parseSTL } from "../io/stl";
 import { stretchFace } from "./stretch";
@@ -57,8 +59,13 @@ export interface EvaluationResult {
 
 function loopDrawing(l: Loop): Drawing {
   if (l.kind === "circle") return drawCircle(l.r).translate(l.cx, l.cy);
+  if (l.kind === "ellipse") return drawEllipse(l.a, l.b).rotate((l.angle * 180) / Math.PI, [0, 0]).translate(l.cx, l.cy);
   let pen = draw(l.start);
-  for (const s of l.segments) pen = s.kind === "line" ? pen.lineTo(s.to) : pen.threePointsArcTo(s.to, s.mid);
+  for (const s of l.segments) {
+    if (s.kind === "line") pen = pen.lineTo(s.to);
+    else if (s.kind === "arc") pen = pen.threePointsArcTo(s.to, s.mid);
+    else pen = pen.cubicBezierCurveTo(s.to, s.c1, s.c2);
+  }
   return pen.close();
 }
 
@@ -96,6 +103,8 @@ function sketchSegments(f: SketchFeature, fr: Frame): Float32Array {
       const s = pointOf(m, e.start), t = pointOf(m, e.end);
       const poly = loopPolygon({ kind: "path", start: [s.x, s.y], segments: [{ kind: "arc", to: [t.x, t.y], mid: arcMidpoint(m, e) }] }, 24);
       ring([...poly, [t.x, t.y]], false);
+    } else if (e.kind === "ellipse" || e.kind === "spline") {
+      ring(curvePolyline(m, e), false);
     }
   }
   return new Float32Array(out);

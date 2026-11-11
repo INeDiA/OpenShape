@@ -92,3 +92,95 @@ export function addArcThrough(
   const arc = { id, kind: "arc" as const, center: c.ids[0], start: ccw ? startId : endId, end: ccw ? endId : startId, radius: Math.hypot(a.x - cx, a.y - cy) };
   return { sketch: push(sk, [arc]), ids: [id] };
 }
+
+/** Ellipse from its center, the end of the major axis and the minor radius. */
+export function addEllipse(s: SketchData, cx: number, cy: number, mx: number, my: number, minor: number): Added | null {
+  const a = Math.hypot(mx - cx, my - cy);
+  if (a < 1e-6 || minor < 1e-6) return null;
+  // The longer axis is the major one.
+  const ux = (mx - cx) / a, uy = (my - cy) / a;
+  const [major, minorR, dir] = minor > a ? [minor, a, [-uy, ux]] : [a, minor, [ux, uy]];
+  const pts = [
+    { id: skId("p"), kind: "point" as const, x: cx, y: cy },
+    { id: skId("p"), kind: "point" as const, x: cx + dir[0] * major, y: cy + dir[1] * major },
+    { id: skId("p"), kind: "point" as const, x: cx - dir[1] * minorR, y: cy + dir[0] * minorR },
+  ];
+  const id = skId("e");
+  return { sketch: push(s, [...pts, { id, kind: "ellipse", center: pts[0].id, major: pts[1].id, minor: pts[2].id }]), ids: [id] };
+}
+
+/** Spline through existing point ids (at least two). */
+export function addSpline(s: SketchData, points: string[], closed = false): Added | null {
+  if (points.length < (closed ? 3 : 2)) return null;
+  const id = skId("s");
+  return { sketch: push(s, [{ id, kind: "spline", points, closed }]), ids: [id] };
+}
+
+/** Outgoing direction at end point `at` of a line or arc (continuing away from the curve). */
+export function exitDirection(s: SketchData, curveId: string, at: string): { x: number; y: number } | null {
+  const m = new Map(s.entities.map((e) => [e.id, e]));
+  const c = m.get(curveId);
+  const P = m.get(at);
+  if (!c || !P || P.kind !== "point") return null;
+  const unit = (x: number, y: number) => {
+    const l = Math.hypot(x, y);
+    return l < 1e-12 ? null : { x: x / l, y: y / l };
+  };
+  if (c.kind === "line") {
+    const other = m.get(c.p1 === at ? c.p2 : c.p1);
+    if (!other || other.kind !== "point" || (c.p1 !== at && c.p2 !== at)) return null;
+    return unit(P.x - other.x, P.y - other.y);
+  }
+  if (c.kind === "arc" && (c.start === at || c.end === at)) {
+    const C = m.get(c.center);
+    if (!C || C.kind !== "point") return null;
+    // Counter-clockwise tangent; at the start the curve is left going backwards.
+    const t = unit(-(P.y - C.y), P.x - C.x);
+    return t && (c.end === at ? t : { x: -t.x, y: -t.y });
+  }
+  return null;
+}
+
+/**
+ * Arc leaving point `from` along direction `dir` and ending at `end`
+ * (an existing point id or coordinates). Returns null when the end is
+ * straight ahead (no arc can be tangent there).
+ */
+export function tangentArcGeom(from: { x: number; y: number }, dir: { x: number; y: number }, end: { x: number; y: number }) {
+  const dx = end.x - from.x, dy = end.y - from.y;
+  const nx = -dir.y, ny = dir.x; // left normal
+  const dn = dx * nx + dy * ny;
+  const d2 = dx * dx + dy * dy;
+  if (Math.abs(dn) < 1e-9 * Math.max(1, Math.sqrt(d2)) || d2 < 1e-12) return null;
+  const r = d2 / (2 * dn); // signed: > 0 turns left (counter-clockwise)
+  return { cx: from.x + nx * r, cy: from.y + ny * r, radius: Math.abs(r), ccw: r > 0 };
+}
+
+/** Adds an arc tangent to `curveId` at its end point `from`, plus the tangency constraint. */
+export function addTangentArc(s: SketchData, curveId: string, from: string, end: string | { x: number; y: number }): Added | null {
+  const dir = exitDirection(s, curveId, from);
+  const P = s.entities.find((e) => e.id === from);
+  if (!dir || !P || P.kind !== "point") return null;
+  let sk = s;
+  let endId: string;
+  if (typeof end === "string") endId = end;
+  else {
+    const r = addPoint(sk, end.x, end.y);
+    sk = r.sketch;
+    endId = r.ids[0];
+  }
+  const E = sk.entities.find((e) => e.id === endId) as { x: number; y: number };
+  const g = tangentArcGeom(P, dir, E);
+  if (!g || endId === from) return null;
+  const c = addPoint(sk, g.cx, g.cy);
+  sk = c.sketch;
+  const id = skId("a");
+  const arc = { id, kind: "arc" as const, center: c.ids[0], start: g.ccw ? from : endId, end: g.ccw ? endId : from, radius: g.radius };
+  // Tangency at the shared point. Lines run p1 -> p2 and arcs counter-clockwise; compare those directions.
+  const prev = sk.entities.find((e) => e.id === curveId)!;
+  const prevParam = prev.kind === "line" ? (prev.p2 === from ? dir : { x: -dir.x, y: -dir.y }) : (prev as { end: string }).end === from ? dir : { x: -dir.x, y: -dir.y };
+  const arcParam = g.ccw ? dir : { x: -dir.x, y: -dir.y }; // leaving `from` along dir is the arc's ccw direction when it turns left
+  const reversed = prevParam.x * arcParam.x + prevParam.y * arcParam.y < 0;
+  sk = push(sk, [arc], [{ id: skId("c"), kind: "tangentAt", a: curveId, b: id, point: from, reversed }]);
+  return { sketch: sk, ids: [id] };
+}

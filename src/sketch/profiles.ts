@@ -3,15 +3,17 @@
 
 import type { SkArc, SkCurve, SketchData } from "./model";
 import { curveEnds, entityMap, pointOf } from "./model";
+import { bezierPoint, ellipseGeom, ellipsePolygon, splineBeziers, splinePoints, type EllipseGeom } from "./curves";
 
 export type Pt = [number, number];
 
 /** One piece of a closed path; arcs are given by a point halfway along them. */
-export type Segment = { kind: "line"; to: Pt } | { kind: "arc"; to: Pt; mid: Pt };
+export type Segment = { kind: "line"; to: Pt } | { kind: "arc"; to: Pt; mid: Pt } | { kind: "bezier"; to: Pt; c1: Pt; c2: Pt };
 
 export type Loop =
   | { kind: "path"; start: Pt; segments: Segment[] }
-  | { kind: "circle"; cx: number; cy: number; r: number };
+  | { kind: "circle"; cx: number; cy: number; r: number }
+  | ({ kind: "ellipse" } & EllipseGeom);
 
 export interface ProfileResult {
   loops: Loop[];
@@ -47,6 +49,15 @@ export function findLoops(s: SketchData): ProfileResult {
       const c = pointOf(m, e.center);
       if (e.radius > TOL) loops.push({ kind: "circle", cx: c.x, cy: c.y, r: e.radius });
     }
+    if (e.kind === "ellipse" && !e.construction) {
+      const g = ellipseGeom(m, e);
+      if (g.a > TOL && g.b > TOL) loops.push({ kind: "ellipse", ...g });
+    }
+    if (e.kind === "spline" && e.closed && !e.construction && e.points.length >= 3) {
+      const pts = splinePoints(m, e);
+      const loop: Loop = { kind: "path", start: pts[0], segments: splineBeziers(pts, true).map((b) => ({ kind: "bezier", ...b })) };
+      if (loopArea(loop) > TOL) loops.push(loop);
+    }
   }
 
   // Union-find over point ids so coincident points act as one vertex.
@@ -59,7 +70,8 @@ export function findLoops(s: SketchData): ProfileResult {
   };
   for (const c of s.constraints) if (c.kind === "coincident") parent.set(find(c.a), find(c.b));
 
-  const open = s.entities.filter((e): e is Exclude<SkCurve, { kind: "circle" }> => (e.kind === "line" || e.kind === "arc") && !e.construction);
+  type OpenCurve = Extract<SkCurve, { kind: "line" | "arc" | "spline" }>;
+  const open = s.entities.filter((e): e is OpenCurve => (e.kind === "line" || e.kind === "arc" || (e.kind === "spline" && !e.closed)) && !e.construction);
   const ends = (c: (typeof open)[number]) => curveEnds(c)!.map(find) as [string, string];
   const adj = new Map<string, (typeof open)[number][]>();
   for (const c of open) for (const p of ends(c)) adj.set(p, [...(adj.get(p) ?? []), c]);
@@ -97,7 +109,13 @@ export function findLoops(s: SketchData): ProfileResult {
       const forward = find(a) === at;
       const toId = forward ? b : a;
       const to = pointOf(m, toId);
-      segments.push(cur.kind === "line" ? { kind: "line", to: [to.x, to.y] } : { kind: "arc", to: [to.x, to.y], mid: arcMidpoint(m, cur) });
+      if (cur.kind === "line") segments.push({ kind: "line", to: [to.x, to.y] });
+      else if (cur.kind === "arc") segments.push({ kind: "arc", to: [to.x, to.y], mid: arcMidpoint(m, cur) });
+      else {
+        // A spline walked backwards is the same curve through its points reversed.
+        const pts = splinePoints(m, cur);
+        for (const b of splineBeziers(forward ? pts : pts.reverse())) segments.push({ kind: "bezier", ...b });
+      }
       at = find(toId);
       const next = adj.get(at)!.find((c) => !used.has(c.id));
       if (!next) break;
@@ -116,9 +134,11 @@ export function loopPolygon(l: Loop, arcSteps = 16): Pt[] {
   if (l.kind === "circle") {
     return Array.from({ length: 48 }, (_, i) => [l.cx + l.r * Math.cos((i / 48) * Math.PI * 2), l.cy + l.r * Math.sin((i / 48) * Math.PI * 2)] as Pt);
   }
+  if (l.kind === "ellipse") return ellipsePolygon(l, 64);
   const pts: Pt[] = [l.start];
   let from = l.start;
   for (const s of l.segments) {
+    if (s.kind === "bezier") for (let k = 1; k < arcSteps; k++) pts.push(bezierPoint(from, s, k / arcSteps));
     if (s.kind === "arc") {
       const c = circleThrough(from, s.mid, s.to);
       if (c) {
@@ -168,6 +188,7 @@ export function loopArea(l: Loop): number {
 
 function samplePoint(l: Loop): Pt {
   if (l.kind === "circle") return [l.cx + l.r * 0.999, l.cy];
+  if (l.kind === "ellipse") return [l.cx + l.a * 0.999 * Math.cos(l.angle), l.cy + l.a * 0.999 * Math.sin(l.angle)];
   return l.start;
 }
 
