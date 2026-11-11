@@ -13,15 +13,28 @@ export interface Autosave {
   fileName: string;
 }
 
+const BROKEN_KEY = "openshape.autosave.unreadable";
+
+/** Set when the last autosave could not be read; it was kept aside under BROKEN_KEY. */
+export let autosaveProblem: string | null = null;
+
 export function loadAutosave(): Autosave | null {
+  let raw: string | null = null;
   try {
-    const raw = localStorage.getItem(AUTOSAVE_KEY);
+    raw = localStorage.getItem(AUTOSAVE_KEY);
     if (!raw) return null;
     const { text, fileName } = JSON.parse(raw) as { text: string; fileName: string };
     const { doc, meta } = parseFile(text);
     return { doc, meta, fileName };
-  } catch {
-    return null; // corrupt or unavailable storage: start fresh
+  } catch (e) {
+    // Never let the next autosave overwrite work we failed to read: keep a copy aside.
+    autosaveProblem = e instanceof Error ? e.message : String(e);
+    try {
+      if (raw) localStorage.setItem(BROKEN_KEY, raw);
+    } catch {
+      /* storage full or blocked */
+    }
+    return null;
   }
 }
 

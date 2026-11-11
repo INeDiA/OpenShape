@@ -3,6 +3,7 @@ import type { SketchFeature } from "../model/types";
 import { constraintActions, CONSTRAINT_GLYPH, dimensionFor } from "./actions";
 import { addArcThrough, addCircle, addConstraint, addEllipse, addLineBetween, addPoint, addRectangle, addSpline, addTangentArc, exitDirection, tangentArcGeom } from "./builders";
 import { ellipseGeom, splineBeziers, splinePoints, type Pt } from "./curves";
+import { offsetCurves, trimCurve } from "./edit";
 import { arcMidpoint } from "./profiles";
 import { bounds, hitTest, type Hit } from "./geometry";
 import { skId } from "./model";
@@ -11,7 +12,7 @@ import { curvePoints, entityMap, isDimension, pointOf, removeConstraints, remove
 import { solve, type DragTarget, type SolveResult } from "./solver";
 import { evalExpr, isPlainNumber, type Scope } from "../expr/expr";
 
-type Tool = "select" | "line" | "rect" | "circle" | "arc" | "tarc" | "ellipse" | "spline";
+type Tool = "select" | "line" | "rect" | "circle" | "arc" | "tarc" | "ellipse" | "spline" | "trim";
 
 interface Props {
   feature: SketchFeature;
@@ -58,7 +59,7 @@ interface EditState {
 
 const SNAP_PX = 9;
 const AXIS_SNAP_DEG = 4;
-const TOOL_KEYS: Record<string, Tool> = { s: "select", l: "line", r: "rect", c: "circle", a: "arc", g: "tarc", o: "ellipse", p: "spline" };
+const TOOL_KEYS: Record<string, Tool> = { s: "select", l: "line", r: "rect", c: "circle", a: "arc", g: "tarc", o: "ellipse", p: "spline", k: "trim" };
 
 /** The line or arc ending at point `id` that a tangent arc should continue (the newest one). */
 function curveEndingAt(s: SketchData, id: string): string | null {
@@ -83,6 +84,8 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
   const [hover, setHover] = useState<Hit | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [edit, setEdit] = useState<EditState | null>(null);
+  /** Offset distance being typed (null when the offset field is closed). */
+  const [offsetText, setOffsetText] = useState<string | null>(null);
   const drag = useRef<DragState | null>(null);
   const pan = useRef<{ x: number; y: number; cx: number; cy: number } | null>(null);
 
@@ -306,6 +309,16 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
       return;
     }
 
+    if (tool === "trim") {
+      const h = hitTest(sketch, x, y, SNAP_PX / view.scale);
+      if (!h || h.kind === "point") return;
+      const r = trimCurve(sketch, h.id, x, y);
+      if ("error" in r) setMessage(r.error);
+      else apply(r.sketch, "trim");
+      setHover(null);
+      return;
+    }
+
     if (tool === "tarc") {
       const snap = snapPoint(x, y);
       if (!pending || pending.tool !== "tarc") {
@@ -473,6 +486,22 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
       // Open the inline editor on the new dimension.
       requestAnimationFrame(() => startEdit(id));
     }
+  };
+
+  const applyOffset = () => {
+    if (offsetText == null) return;
+    const src = offsetText.trim().replace(",", ".");
+    setOffsetText(null);
+    let d: number;
+    try {
+      d = evalExpr(src, scope);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    const r = offsetCurves(sketch, selection, d);
+    if ("error" in r) setMessage(r.error);
+    else if (apply(r.sketch, "offset")) setSelection(new Set(r.ids));
   };
 
   const toggleConstruction = () => {
@@ -753,6 +782,12 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
 
   // Preview of the tool in progress.
   let preview: ReactElement | null = null;
+  if (tool === "trim" && hover && hover.kind !== "point" && cursor) {
+    const r = trimCurve(sketch, hover.id, cursor.x, cursor.y);
+    if (!("error" in r) && r.removed.length > 1) {
+      preview = <polyline points={r.removed.map(([px, py]) => toScreen(px, py).join(",")).join(" ")} className="trim-preview" />;
+    }
+  }
   if (pending && cursor) {
     if (pending.tool === "line") {
       const a = { x: pending.x, y: pending.y };
@@ -910,6 +945,7 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
               ["tarc", "◡ Tangent arc", "G"],
               ["ellipse", "⬭ Ellipse", "O"],
               ["spline", "∿ Spline", "P"],
+              ["trim", "✂ Trim", "K"],
             ] as const
           ).map(([t, label, key]) => (
             <button key={t} className={tool === t ? "active" : ""} title={`${label} (${key})`} onClick={() => (setTool(t), setPending(null))}>
@@ -933,6 +969,27 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
               ┄ Construction
             </button>
           )}
+          {[...selection].some((id) => ["line", "circle", "arc"].includes(m.get(id)?.kind ?? "")) &&
+            (offsetText == null ? (
+              <button title="Offset the selected curves" onClick={() => setOffsetText("5")}>
+                ⇉ Offset
+              </button>
+            ) : (
+              <label className="offset-field" title="Positive grows closed shapes, negative shrinks them">
+                Offset
+                <input
+                  autoFocus
+                  value={offsetText}
+                  onChange={(e) => setOffsetText(e.target.value)}
+                  onFocus={(e) => e.target.select()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") applyOffset();
+                    if (e.key === "Escape") setOffsetText(null);
+                  }}
+                />
+                <button onClick={applyOffset}>✓</button>
+              </label>
+            ))}
           {selection.size > 0 && (
             <button title="Delete (⌫)" onClick={deleteSelection}>
               ✕ Delete

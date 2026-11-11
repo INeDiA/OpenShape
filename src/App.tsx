@@ -25,7 +25,7 @@ import { VariablesPanel } from "./ui/VariablesPanel";
 import { useManipulation } from "./ui/useManipulation";
 import { EXPORT_FORMATS, exportMesh, type ExportFormat } from "./io/exporters";
 import type { FileMeta } from "./io/fileFormat";
-import { downloadBlob, GENERATOR, loadAutosave, loadHistory, openDocument, resetFileHandle, saveDocument, writeAutosave, writeHistory } from "./io/storage";
+import { downloadBlob, GENERATOR, autosaveProblem, loadAutosave, loadHistory, openDocument, resetFileHandle, saveDocument, writeAutosave, writeHistory } from "./io/storage";
 
 const UNTITLED = "Untitled.openshape";
 const newMeta = (): FileMeta => {
@@ -312,6 +312,11 @@ export function App() {
       flash(`Save failed: ${e instanceof Error ? e.message : e}`);
     }
   };
+
+  useEffect(() => {
+    if (autosaveProblem) flash(`The autosaved document could not be opened (${autosaveProblem}); a copy was kept in browser storage.`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Autosave to the browser so a reload never loses work.
   useEffect(() => {

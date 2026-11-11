@@ -171,10 +171,13 @@ export function validateDocument(raw: unknown): Document {
 function validateSketch(raw: unknown, at: string) {
   need(isObj(raw), `${at} is missing`);
   need(Array.isArray(raw.entities) && Array.isArray(raw.constraints), `${at} needs entities and constraints`);
+  // Entities may come in any order; references are checked against all ids.
   const ids = new Set<string>();
   for (const [i, e] of (raw.entities as SkEntity[]).entries()) {
     need(isObj(e) && typeof e.id === "string", `${at}.entities[${i}] is invalid`);
     ids.add(e.id);
+  }
+  for (const [i, e] of (raw.entities as SkEntity[]).entries()) {
     if (e.kind === "point") {
       num(e.x, `${at}.entities[${i}].x`);
       num(e.y, `${at}.entities[${i}].y`);
@@ -186,6 +189,10 @@ function validateSketch(raw: unknown, at: string) {
     } else if (e.kind === "arc") {
       need(ids.has(e.center) && ids.has(e.start) && ids.has(e.end), `${at}.entities[${i}] references missing points`);
       num(e.radius, `${at}.entities[${i}].radius`);
+    } else if (e.kind === "ellipse") {
+      need(ids.has(e.center) && ids.has(e.major) && ids.has(e.minor), `${at}.entities[${i}] references missing points`);
+    } else if (e.kind === "spline") {
+      need(Array.isArray(e.points) && e.points.length >= 2 && e.points.every((p) => ids.has(p)), `${at}.entities[${i}] references missing points`);
     } else {
       throw new FileFormatError(`Invalid document: ${at}.entities[${i}] has unknown kind`);
     }

@@ -2,7 +2,8 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { fileURLToPath } from "node:url";
 import opencascade from "replicad-opencascadejs";
 import { measureVolume, setOC } from "replicad";
-import { addEllipse, addLineBetween, addPoint, addSpline, addTangentArc } from "../sketch/builders";
+import { addCircle, addEllipse, addLineBetween, addPoint, addRectangle, addSpline, addTangentArc } from "../sketch/builders";
+import { trimCurve } from "../sketch/edit";
 import { emptySketch, type SketchData } from "../sketch/model";
 import { makeExtrude, makeSketch } from "../model/doc";
 import type { Document } from "../model/types";
@@ -78,5 +79,34 @@ describe("new sketch curves in solids", () => {
     const r = await extruded(closing.sketch);
     // 30 x 10 rectangle plus two half discs of radius 5.
     expect(measureVolume(r.body!.shape)).toBeCloseTo((30 * 10 + Math.PI * 25) * 10, 0);
+  });
+
+  it("extrudes an outline made by trimming a rectangle and a circle", async () => {
+    const rect = addRectangle(emptySketch(), 0, 0, 20, 10);
+    const circle = addCircle(rect.sketch, 20, 5, 5);
+    const t1 = trimCurve(circle.sketch, circle.ids[0], 16, 5);
+    if ("error" in t1) throw new Error(t1.error);
+    const t2 = trimCurve(t1.sketch, rect.ids[1], 20, 5);
+    if ("error" in t2) throw new Error(t2.error);
+    const r = await extruded(t2.sketch);
+    expect(measureVolume(r.body!.shape)).toBeCloseTo((200 + (Math.PI * 25) / 2) * 10, 0);
+  });
+
+  it("fuses regions side by side and still cuts holes", async () => {
+    let s = addRectangle(emptySketch(), 0, 0, 20, 10).sketch;
+    const a = addPoint(s, 10, 0), b = addPoint(a.sketch, 10, 10);
+    s = addLineBetween(b.sketch, a.ids[0], b.ids[0]).sketch;
+    s = addCircle(s, 5, 5, 2).sketch;
+    const r = await extruded(s);
+    expect(measureVolume(r.body!.shape)).toBeCloseTo((200 - Math.PI * 4) * 10, 0);
+  });
+
+  it("extrudes a rectangle with an arc bump ending on two edges", async () => {
+    const rect = addRectangle(emptySketch(), -10, -3, 3, 7);
+    const circle = addCircle(rect.sketch, 3, 0, 3.2766);
+    const t = trimCurve(circle.sketch, circle.ids[0], 1, 0);
+    if ("error" in t) throw new Error(t.error);
+    const r = await extruded(t.sketch);
+    expect(measureVolume(r.body!.shape)).toBeGreaterThan(1300);
   });
 });

@@ -97,17 +97,25 @@ and the normal points out of the solid.
 
 ```ts
 interface Sketch {
-  entities: (Point | Line | Circle)[];  // points before the curves that use them
+  entities: (Point | Line | Circle | Arc | Ellipse | Spline)[];  // in any order
   constraints: Constraint[];
 }
 interface Point  { id: string; kind: "point";  x: number; y: number }
 interface Line   { id: string; kind: "line";   p1: string; p2: string; construction?: boolean }
 interface Circle { id: string; kind: "circle"; center: string; radius: number; construction?: boolean }
 interface Arc    { id: string; kind: "arc";    center: string; start: string; end: string; radius: number; construction?: boolean }
+interface Ellipse { id: string; kind: "ellipse"; center: string; major: string; minor: string; construction?: boolean }
+interface Spline { id: string; kind: "spline"; points: string[]; closed?: boolean; construction?: boolean }
 ```
 
-Arcs run counter-clockwise from `start` to `end`. Lines and arcs that share a point id are connected. Construction geometry is ignored when
-building solids. Closed loops of non-construction curves become faces; loops
+Arcs run counter-clockwise from `start` to `end`. An ellipse is given by its
+center and one end of each axis (`major`, `minor`: point ids, perpendicular). A
+spline is a uniform Catmull-Rom curve through its points (drawn as cubic Béziers
+with control points offset by a sixth of the neighbours' chord); a closed spline
+wraps around. Lines, arcs and open splines that share a point id are connected,
+and a curve end lying on another line, arc or circle splits it there.
+Construction geometry is ignored when building solids. The bounded regions of the
+non-construction curves become faces: regions side by side are joined, regions
 nested inside others become holes.
 
 Constraints (`kind` and fields):
@@ -121,7 +129,8 @@ Constraints (`kind` and fields):
 | `equal` | `a`, `b` (two lines or two circles) |
 | `pointOnLine`, `midpoint` | `point`, `line` |
 | `pointOnCircle` | `point`, `circle` (a circle or an arc) |
-| `tangent` | `line`, `circle` (a circle or an arc) |
+| `tangent` | `line` (a line or an arc), `circle` (a circle or an arc) |
+| `tangentAt` | `a`, `b` (lines or arcs), `point` (where they meet), `reversed` (their directions are opposite: lines run `p1`→`p2`, arcs counter-clockwise) |
 | `distance` | `a`, `b` (points), `value`, `expr?` |
 | `length` | `line`, `value`, `expr?` |
 | `radius` | `circle` (a circle or an arc), `value`, `expr?` |

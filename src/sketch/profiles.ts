@@ -34,31 +34,30 @@ export function arcMidpoint(s: SketchData | ReturnType<typeof entityMap>, a: SkA
   return [c.x + r * Math.cos(am), c.y + r * Math.sin(am)];
 }
 
+/** A piece of a curve between two vertices (a whole curve unless something ends on it). */
+interface Piece {
+  curve: string;
+  a: string;
+  b: string;
+  segs: (forward: boolean) => Segment[];
+  /** A point a little way along the piece from where the walk starts (gives the leaving direction). */
+  probe: (forward: boolean) => Pt;
+}
+
+/** Distance under which an end point counts as lying on another curve. */
+const ON_TOL = 1e-5;
+
 /**
- * Closed loops from non-construction geometry. Lines and arcs are joined
- * through shared point ids or coincident constraints; every vertex of a loop
- * must have degree 2. Circles are loops on their own.
+ * Closed regions from non-construction geometry. Lines, arcs and open splines
+ * are joined through shared point ids or coincident constraints. A curve end
+ * that lies on another line, arc or circle splits it there (T-junctions, as
+ * left by trimming) and dangling pieces are ignored. The pieces form a planar
+ * graph whose bounded faces are the loops; faces side by side are fused later
+ * (see nestLoops). Circles and ellipses nothing ends on are loops of their own.
  */
 export function findLoops(s: SketchData): ProfileResult {
   const m = entityMap(s);
   const loops: Loop[] = [];
-  const openCurves: string[] = [];
-
-  for (const e of s.entities) {
-    if (e.kind === "circle" && !e.construction) {
-      const c = pointOf(m, e.center);
-      if (e.radius > TOL) loops.push({ kind: "circle", cx: c.x, cy: c.y, r: e.radius });
-    }
-    if (e.kind === "ellipse" && !e.construction) {
-      const g = ellipseGeom(m, e);
-      if (g.a > TOL && g.b > TOL) loops.push({ kind: "ellipse", ...g });
-    }
-    if (e.kind === "spline" && e.closed && !e.construction && e.points.length >= 3) {
-      const pts = splinePoints(m, e);
-      const loop: Loop = { kind: "path", start: pts[0], segments: splineBeziers(pts, true).map((b) => ({ kind: "bezier", ...b })) };
-      if (loopArea(loop) > TOL) loops.push(loop);
-    }
-  }
 
   // Union-find over point ids so coincident points act as one vertex.
   const parent = new Map<string, string>();
@@ -71,61 +70,160 @@ export function findLoops(s: SketchData): ProfileResult {
   for (const c of s.constraints) if (c.kind === "coincident") parent.set(find(c.a), find(c.b));
 
   type OpenCurve = Extract<SkCurve, { kind: "line" | "arc" | "spline" }>;
-  const open = s.entities.filter((e): e is OpenCurve => (e.kind === "line" || e.kind === "arc" || (e.kind === "spline" && !e.closed)) && !e.construction);
-  const ends = (c: (typeof open)[number]) => curveEnds(c)!.map(find) as [string, string];
-  const adj = new Map<string, (typeof open)[number][]>();
-  for (const c of open) for (const p of ends(c)) adj.set(p, [...(adj.get(p) ?? []), c]);
+  const solid = s.entities.filter((e): e is SkCurve => e.kind !== "point" && !e.construction);
+  const open = solid.filter((e): e is OpenCurve => e.kind === "line" || e.kind === "arc" || (e.kind === "spline" && !e.closed));
 
-  const visited = new Set<string>();
-  for (const first of open) {
-    if (visited.has(first.id)) continue;
-    const comp: (typeof open)[number][] = [];
-    const stack = [first];
-    while (stack.length) {
-      const c = stack.pop()!;
-      if (visited.has(c.id)) continue;
-      visited.add(c.id);
-      comp.push(c);
-      for (const p of ends(c)) for (const n of adj.get(p) ?? []) if (!visited.has(n.id)) stack.push(n);
-    }
-    const vertices = new Set(comp.flatMap(ends));
-    // Two arcs (or an arc and a line) can close a loop; a single curve can't.
-    const closed = comp.length >= 2 && [...vertices].every((v) => adj.get(v)!.length === 2);
-    if (!closed) {
-      openCurves.push(...comp.map((c) => c.id));
-      continue;
-    }
+  // Vertices: the (merged) end points of open curves.
+  const vertices = new Map<string, Pt>();
+  for (const c of open) for (const id of curveEnds(c)!) {
+    const p = pointOf(m, find(id));
+    vertices.set(find(id), [p.x, p.y]);
+  }
+  const pos = (v: string) => vertices.get(v)!;
+  const ang = (cx: number, cy: number, p: Pt) => Math.atan2(p[1] - cy, p[0] - cx);
+  const arcSeg = (cx: number, cy: number, r: number, a0: number, a1: number, to: Pt): Segment => {
+    const am = (a0 + a1) / 2;
+    return { kind: "arc", to, mid: [cx + r * Math.cos(am), cy + r * Math.sin(am)] };
+  };
+  /** Counter-clockwise arc pieces through the sorted vertices `vs` (angles increasing from a0). */
+  const arcPieces = (curve: string, cx: number, cy: number, r: number, vs: { v: string; t: number }[]): Piece[] =>
+    vs.slice(0, -1).map((x, i) => {
+      const y = vs[i + 1];
+      const at = (t: number): Pt => [cx + r * Math.cos(t), cy + r * Math.sin(t)];
+      return {
+        curve,
+        a: x.v,
+        b: y.v,
+        segs: (fwd) => [fwd ? arcSeg(cx, cy, r, x.t, y.t, pos(y.v)) : arcSeg(cx, cy, r, x.t, y.t, pos(x.v))],
+        probe: (fwd) => at(fwd ? x.t + (y.t - x.t) * 0.02 : y.t - (y.t - x.t) * 0.02),
+      };
+    });
+  const twoPi = Math.PI * 2;
 
-    // Walk the cycle, recording each curve in the direction it's traversed.
-    const startId = curveEnds(comp[0])![0];
-    const start = pointOf(m, startId);
-    let at = find(startId);
-    let cur = comp[0];
-    const used = new Set<string>();
-    const segments: Segment[] = [];
-    for (let i = 0; i < comp.length; i++) {
-      used.add(cur.id);
-      const [a, b] = curveEnds(cur)!;
-      const forward = find(a) === at;
-      const toId = forward ? b : a;
-      const to = pointOf(m, toId);
-      if (cur.kind === "line") segments.push({ kind: "line", to: [to.x, to.y] });
-      else if (cur.kind === "arc") segments.push({ kind: "arc", to: [to.x, to.y], mid: arcMidpoint(m, cur) });
-      else {
-        // A spline walked backwards is the same curve through its points reversed.
-        const pts = splinePoints(m, cur);
-        for (const b of splineBeziers(forward ? pts : pts.reverse())) segments.push({ kind: "bezier", ...b });
+  const pieces: Piece[] = [];
+  for (const c of solid) {
+    if (c.kind === "line") {
+      const [a, b] = [find(c.p1), find(c.p2)];
+      const A = pos(a), B = pos(b);
+      const dx = B[0] - A[0], dy = B[1] - A[1], len2 = dx * dx + dy * dy;
+      const inner: { v: string; t: number }[] = [];
+      for (const [v, p] of vertices) {
+        if (v === a || v === b || len2 < 1e-18) continue;
+        const t = ((p[0] - A[0]) * dx + (p[1] - A[1]) * dy) / len2;
+        if (t <= 1e-9 || t >= 1 - 1e-9) continue;
+        if (Math.hypot(A[0] + t * dx - p[0], A[1] + t * dy - p[1]) < ON_TOL) inner.push({ v, t });
       }
-      at = find(toId);
-      const next = adj.get(at)!.find((c) => !used.has(c.id));
-      if (!next) break;
-      cur = next;
+      const chain = [{ v: a, t: 0 }, ...inner.sort((x, y) => x.t - y.t), { v: b, t: 1 }];
+      for (let i = 0; i + 1 < chain.length; i++) {
+        const x = chain[i].v, y = chain[i + 1].v;
+        pieces.push({
+          curve: c.id,
+          a: x,
+          b: y,
+          segs: (fwd) => [{ kind: "line", to: pos(fwd ? y : x) }],
+          probe: (fwd) => (fwd ? pos(y) : pos(x)),
+        });
+      }
+    } else if (c.kind === "arc" || c.kind === "circle") {
+      const ctr = pointOf(m, c.center);
+      const r = c.radius;
+      const onCurve = (p: Pt) => Math.abs(Math.hypot(p[0] - ctr.x, p[1] - ctr.y) - r) < ON_TOL;
+      if (c.kind === "arc") {
+        const [a, b] = [find(c.start), find(c.end)];
+        const a0 = ang(ctr.x, ctr.y, pos(a));
+        let span = ang(ctr.x, ctr.y, pos(b)) - a0;
+        if (span <= 0) span += twoPi;
+        const inner: { v: string; t: number }[] = [];
+        for (const [v, p] of vertices) {
+          if (v === a || v === b || !onCurve(p)) continue;
+          let t = ang(ctr.x, ctr.y, p) - a0;
+          t = ((t % twoPi) + twoPi) % twoPi;
+          if (t > 1e-9 && t < span - 1e-9) inner.push({ v, t: a0 + t });
+        }
+        pieces.push(...arcPieces(c.id, ctr.x, ctr.y, r, [{ v: a, t: a0 }, ...inner.sort((x, y) => x.t - y.t), { v: b, t: a0 + span }]));
+      } else {
+        const on = [...vertices].filter(([, p]) => onCurve(p)).map(([v, p]) => ({ v, t: ang(ctr.x, ctr.y, p) }));
+        if (on.length < 2) {
+          if (r > TOL) loops.push({ kind: "circle", cx: ctr.x, cy: ctr.y, r });
+          continue;
+        }
+        on.sort((x, y) => x.t - y.t);
+        pieces.push(...arcPieces(c.id, ctr.x, ctr.y, r, [...on, { v: on[0].v, t: on[0].t + twoPi }]));
+      }
+    } else if (c.kind === "spline" && !c.closed) {
+      const [a, b] = curveEnds(c)!.map(find);
+      pieces.push({
+        curve: c.id,
+        a,
+        b,
+        // A spline walked backwards is the same curve through its points reversed.
+        segs: (fwd) => {
+          const pts = splinePoints(m, c);
+          return splineBeziers(fwd ? pts : pts.reverse()).map((z) => ({ kind: "bezier", ...z }));
+        },
+        probe: (fwd) => {
+          const pts = splinePoints(m, c);
+          if (!fwd) pts.reverse();
+          return bezierPoint(pts[0], splineBeziers(pts)[0], 0.02);
+        },
+      });
+    } else if (c.kind === "ellipse") {
+      const g = ellipseGeom(m, c);
+      if (g.a > TOL && g.b > TOL) loops.push({ kind: "ellipse", ...g });
+    } else if (c.kind === "spline" && c.closed && c.points.length >= 3) {
+      const pts = splinePoints(m, c);
+      const loop: Loop = { kind: "path", start: pts[0], segments: splineBeziers(pts, true).map((b) => ({ kind: "bezier", ...b })) };
+      if (loopArea(loop) > TOL) loops.push(loop);
     }
-    const loop: Loop = { kind: "path", start: [start.x, start.y], segments };
-    if (loopArea(loop) > TOL) loops.push(loop);
-    else openCurves.push(...comp.map((c) => c.id));
   }
 
+  // Drop dangling pieces (an end nothing else meets), repeatedly.
+  let live = pieces;
+  for (;;) {
+    const deg = new Map<string, number>();
+    for (const p of live) for (const v of [p.a, p.b]) deg.set(v, (deg.get(v) ?? 0) + 1);
+    const next = live.filter((p) => deg.get(p.a)! > 1 && deg.get(p.b)! > 1);
+    if (next.length === live.length) break;
+    live = next;
+  }
+
+  // Half-edges leaving each vertex, sorted counter-clockwise by leaving direction.
+  type Half = { p: Piece; fwd: boolean };
+  const from = (h: Half) => (h.fwd ? h.p.a : h.p.b);
+  const to = (h: Half) => (h.fwd ? h.p.b : h.p.a);
+  const angle = (h: Half) => {
+    const o = pos(from(h)), q = h.p.probe(h.fwd);
+    return Math.atan2(q[1] - o[1], q[0] - o[0]);
+  };
+  const out = new Map<string, Half[]>();
+  for (const p of live) for (const h of [{ p, fwd: true }, { p, fwd: false }]) out.set(from(h), [...(out.get(from(h)) ?? []), h]);
+  for (const list of out.values()) list.sort((x, y) => angle(x) - angle(y));
+
+  // Walk each face keeping it on the left: at every vertex turn to the edge just clockwise of the way back.
+  const key = (h: Half) => `${pieces.indexOf(h.p)}${h.fwd ? "+" : "-"}`;
+  const seen = new Set<string>();
+  const inLoop = new Set<string>();
+  for (const first of [...out.values()].flat()) {
+    if (seen.has(key(first))) continue;
+    const face: Half[] = [];
+    let h = first;
+    while (!seen.has(key(h))) {
+      seen.add(key(h));
+      face.push(h);
+      const list = out.get(to(h))!;
+      const back = list.findIndex((x) => x.p === h.p && x.fwd !== h.fwd);
+      h = list[(back - 1 + list.length) % list.length];
+    }
+    if (face.length < 2 || h !== first) continue;
+    const loop: Loop = { kind: "path", start: pos(from(face[0])), segments: face.flatMap((x) => x.p.segs(x.fwd)) };
+    // Bounded faces run counter-clockwise; the outside of each component comes out clockwise.
+    if (polygonArea(loopPolygon(loop)) > TOL) {
+      loops.push(loop);
+      for (const x of face) inLoop.add(x.p.curve);
+    }
+  }
+
+  const openCurves = [...new Set(pieces.map((p) => p.curve))].filter((id) => !inLoop.has(id));
   return { loops, openCurves };
 }
 
@@ -186,10 +284,25 @@ export function loopArea(l: Loop): number {
   return l.kind === "circle" ? Math.PI * l.r * l.r : Math.abs(polygonArea(loopPolygon(l)));
 }
 
+/** A point just inside the loop (off its boundary, which neighbouring regions share). */
 function samplePoint(l: Loop): Pt {
   if (l.kind === "circle") return [l.cx + l.r * 0.999, l.cy];
   if (l.kind === "ellipse") return [l.cx + l.a * 0.999 * Math.cos(l.angle), l.cy + l.a * 0.999 * Math.sin(l.angle)];
-  return l.start;
+  const poly = loopPolygon(l);
+  const sign = polygonArea(poly) > 0 ? 1 : -1;
+  // Midpoint of the longest edge, nudged towards the inside.
+  let best = 0, len = -1;
+  for (let i = 0; i < poly.length; i++) {
+    const [x1, y1] = poly[i], [x2, y2] = poly[(i + 1) % poly.length];
+    const d = Math.hypot(x2 - x1, y2 - y1);
+    if (d > len) {
+      len = d;
+      best = i;
+    }
+  }
+  const [x1, y1] = poly[best], [x2, y2] = poly[(best + 1) % poly.length];
+  const k = (sign * Math.min(len * 0.01, 1e-3)) / (len || 1);
+  return [(x1 + x2) / 2 - (y2 - y1) * k, (y1 + y2) / 2 + (x2 - x1) * k];
 }
 
 export function loopContains(outer: Loop, [x, y]: Pt): boolean {
