@@ -42,6 +42,56 @@ export function clearAutosave() {
   }
 }
 
+// ---- undo history --------------------------------------------------------------
+
+const HISTORY_KEY = "openshape.history.v1";
+/** Upper bound for the stored undo history (localStorage holds ~5 MB per origin). */
+const HISTORY_BUDGET = 2_500_000;
+
+export interface StoredHistory {
+  past: Document[];
+  future: Document[];
+}
+
+/** JSON with sorted keys, so equal documents compare equal however they were built. */
+export function canonical(v: unknown): string {
+  return JSON.stringify(v, (_k, x) =>
+    x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, (x as Record<string, unknown>)[k]])) : x,
+  );
+}
+
+/**
+ * Saves undo/redo stacks next to the current document. The oldest undo steps
+ * (then the farthest redo steps) are dropped until the record fits the budget.
+ */
+export function writeHistory(current: Document, past: Document[], future: Document[]): boolean {
+  try {
+    const cur = canonical(current);
+    const p = past.map((d) => JSON.stringify(d));
+    const f = future.map((d) => JSON.stringify(d));
+    let size = cur.length + p.reduce((s, x) => s + x.length, 0) + f.reduce((s, x) => s + x.length, 0);
+    while (size > HISTORY_BUDGET && p.length) size -= p.shift()!.length;
+    while (size > HISTORY_BUDGET && f.length) size -= f.pop()!.length;
+    localStorage.setItem(HISTORY_KEY, `{"current":${cur},"past":[${p.join(",")}],"future":[${f.join(",")}]}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The stored stacks, only if they were saved for `current` (otherwise they belong to another state). */
+export function loadHistory(current: Document): StoredHistory | null {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    if (!raw) return null;
+    const h = JSON.parse(raw) as StoredHistory & { current: Document };
+    if (canonical(h.current) !== canonical(current) || !Array.isArray(h.past) || !Array.isArray(h.future)) return null;
+    return { past: h.past, future: h.future };
+  } catch {
+    return null;
+  }
+}
+
 // ---- files -------------------------------------------------------------------
 
 interface FsHandle {

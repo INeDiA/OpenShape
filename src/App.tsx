@@ -25,7 +25,7 @@ import { VariablesPanel } from "./ui/VariablesPanel";
 import { useManipulation } from "./ui/useManipulation";
 import { EXPORT_FORMATS, exportMesh, type ExportFormat } from "./io/exporters";
 import type { FileMeta } from "./io/fileFormat";
-import { downloadBlob, GENERATOR, loadAutosave, openDocument, resetFileHandle, saveDocument, writeAutosave } from "./io/storage";
+import { downloadBlob, GENERATOR, loadAutosave, loadHistory, openDocument, resetFileHandle, saveDocument, writeAutosave, writeHistory } from "./io/storage";
 
 const UNTITLED = "Untitled.openshape";
 const newMeta = (): FileMeta => {
@@ -41,70 +41,55 @@ const solveSketch: SketchSolver = (s) => {
   return r.ok && r.conflicting.length === 0 ? r.sketch : null;
 };
 import { HistoryPanel } from "./ui/HistoryPanel";
+import { moveFeature, removeFeatures } from "./model/history";
 import { PropertiesPanel } from "./ui/PropertiesPanel";
 import { Viewport, type HoverInfo } from "./viewport/Viewport";
 
 type KernelState = "loading" | "ready" | "error";
 
-/** Undoable document state. */
-function useDocument(initial: () => Document) {
-  const [past, setPast] = useState<Document[]>([]);
-  const [doc, setDoc] = useState<Document>(initial);
-  const [future, setFuture] = useState<Document[]>([]);
-
-  const commit = useCallback((next: Document) => {
-    setDoc((cur) => {
-      setPast((p) => [...p.slice(-99), cur]);
-      return next;
-    });
-    setFuture([]);
-  }, []);
-  /** Functional commit: derives the next document from the latest one. */
-  const update = useCallback((fn: (cur: Document) => Document) => {
-    setDoc((cur) => {
-      const next = fn(cur);
-      if (next === cur) return cur;
-      setPast((p) => [...p.slice(-99), cur]);
-      return next;
-    });
-    setFuture([]);
-  }, []);
-  const undo = useCallback(() => {
-    setPast((p) => {
-      if (!p.length) return p;
-      setDoc((cur) => {
-        setFuture((f) => [cur, ...f]);
-        return p[p.length - 1];
-      });
-      return p.slice(0, -1);
-    });
-  }, []);
-  const redo = useCallback(() => {
-    setFuture((f) => {
-      if (!f.length) return f;
-      setDoc((cur) => {
-        setPast((p) => [...p, cur]);
-        return f[0];
-      });
-      return f.slice(1);
-    });
-  }, []);
-  /** Loads a different document and starts a fresh undo history. */
-  const replace = useCallback((next: Document) => {
-    setDoc(next);
-    setPast([]);
-    setFuture([]);
-  }, []);
-  return { doc, commit, update, replace, undo, redo, canUndo: past.length > 0, canRedo: future.length > 0 };
+/** Undoable document state: one state object, so every transition is a pure function. */
+interface DocHistory {
+  past: Document[];
+  doc: Document;
+  future: Document[];
 }
+const UNDO_LIMIT = 100;
 
+function useDocument(initial: () => { doc: Document; past?: Document[]; future?: Document[] }) {
+  const [h, setH] = useState<DocHistory>(() => {
+    const s = initial();
+    return { past: s.past ?? [], doc: s.doc, future: s.future ?? [] };
+  });
+  const push = (cur: DocHistory, next: Document): DocHistory =>
+    next === cur.doc ? cur : { past: [...cur.past.slice(-(UNDO_LIMIT - 1)), cur.doc], doc: next, future: [] };
+
+  const commit = useCallback((next: Document) => setH((cur) => push(cur, next)), []);
+  /** Functional commit: derives the next document from the latest one. */
+  const update = useCallback((fn: (cur: Document) => Document) => setH((cur) => push(cur, fn(cur.doc))), []);
+  const undo = useCallback(
+    () => setH((cur) => (cur.past.length ? { past: cur.past.slice(0, -1), doc: cur.past[cur.past.length - 1], future: [cur.doc, ...cur.future] } : cur)),
+    [],
+  );
+  const redo = useCallback(
+    () => setH((cur) => (cur.future.length ? { past: [...cur.past, cur.doc], doc: cur.future[0], future: cur.future.slice(1) } : cur)),
+    [],
+  );
+  /** Loads a different document and starts a fresh undo history. */
+  const replace = useCallback((next: Document) => setH({ past: [], doc: next, future: [] }), []);
+  return { ...h, commit, update, replace, undo, redo, canUndo: h.past.length > 0, canRedo: h.future.length > 0 };
+}
 
 export function App() {
   const kernel = useRef<KernelClient | null>(null);
   const [kernelState, setKernelState] = useState<KernelState>("loading");
   const [kernelError, setKernelError] = useState("");
   const [boot] = useState(() => loadAutosave());
-  const { doc, commit: rawCommit, update: rawUpdate, replace, undo, redo, canUndo, canRedo } = useDocument(() => boot?.doc ?? demoDocument());
+  const { doc, past, future, commit: rawCommit, update: rawUpdate, replace, undo, redo, canUndo, canRedo } = useDocument(() => {
+    if (!boot) return { doc: demoDocument() };
+    // Undo history survives reloads when it was saved for this very document.
+    const h = loadHistory(boot.doc);
+    return { doc: boot.doc, past: h?.past, future: h?.future };
+  });
   const [fileName, setFileName] = useState(boot?.fileName ?? UNTITLED);
   const [meta, setMeta] = useState<FileMeta>(boot?.meta ?? newMeta());
   // The document as last saved to a file; autosaved-only work still counts as unsaved.
@@ -257,6 +242,11 @@ export function App() {
     input.click();
   };
 
+  const deleteFeature = (id: string) => {
+    commit(removeFeature(doc, id));
+    if (selectedId === id) setSelectedId(null);
+  };
+
   const flash = (msg: string) => {
     setNotice(msg);
     setTimeout(() => setNotice((n) => (n === msg ? null : n)), 4000);
@@ -328,6 +318,10 @@ export function App() {
     const t = setTimeout(() => writeAutosave(doc, { ...meta, modified: new Date().toISOString() }, fileName), 400);
     return () => clearTimeout(t);
   }, [doc, meta, fileName]);
+  useEffect(() => {
+    const t = setTimeout(() => writeHistory(doc, past, future), 600);
+    return () => clearTimeout(t);
+  }, [doc, past, future]);
 
   useEffect(() => {
     document.title = `${dirty ? "• " : ""}${baseName(fileName)} – OpenShape`;
@@ -344,6 +338,21 @@ export function App() {
         e.preventDefault();
         open();
       }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  // Delete / Backspace removes the feature selected in the history (not while typing or sketching).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
+      const t = e.target as HTMLElement;
+      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable) return;
+      const s = manip.selection;
+      if (editingSketchId || !selectedId || s.faces.length || s.edges.length || s.body) return;
+      e.preventDefault();
+      deleteFeature(selectedId);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -452,9 +461,16 @@ export function App() {
           const f = doc.features.find((x) => x.id === id)!;
           commit(updateFeature(doc, id, { suppressed: !f.suppressed }));
         }}
-        onDelete={(id) => {
-          commit(removeFeature(doc, id));
-          if (selectedId === id) setSelectedId(null);
+        onDelete={deleteFeature}
+        onMove={(id, to) => {
+          const r = moveFeature(doc, id, to);
+          if (!r.ok) flash(`Can't move: ${r.reason}`);
+          else if (r.doc !== doc) commit(r.doc);
+        }}
+        onDeleteErrors={(ids) => {
+          commit(removeFeatures(doc, ids));
+          if (selectedId && ids.includes(selectedId)) setSelectedId(null);
+          flash(`Deleted ${ids.length} feature${ids.length > 1 ? "s" : ""}`);
         }}
       />
 

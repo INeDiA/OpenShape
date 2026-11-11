@@ -3,6 +3,35 @@ import type { Scope } from "../expr/expr";
 import { isDimension } from "../sketch/model";
 import { ExprInput } from "./ExprInput";
 import { findLoops } from "../sketch/profiles";
+import { useEffect, useState } from "react";
+
+/** Feature name, edited in place; commits on Enter or blur, Escape restores it. */
+function NameInput({ name, onRename }: { name: string; onRename: (name: string) => void }) {
+  const [text, setText] = useState(name);
+  useEffect(() => setText(name), [name]);
+  const done = () => {
+    const t = text.trim();
+    if (t && t !== name) onRename(t);
+    else setText(name);
+  };
+  return (
+    <input
+      className="name-input"
+      value={text}
+      title="Rename"
+      aria-label="Feature name"
+      onChange={(e) => setText(e.target.value)}
+      onBlur={done}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        else if (e.key === "Escape") {
+          setText(name);
+          setTimeout(() => (e.target as HTMLInputElement).blur());
+        }
+      }}
+    />
+  );
+}
 
 interface Props {
   feature: Feature | null;
@@ -75,7 +104,8 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
 
   return (
     <aside className="panel props">
-      <h2>{f.name}</h2>
+      <h2>Properties</h2>
+      <NameInput key={f.id} name={f.name} onRename={(name) => onChange({ name })} />
       {status && !status.ok && <p className="error-msg">{status.error}</p>}
 
       {f.type === "sketch" && (
