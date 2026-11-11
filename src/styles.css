@@ -72,15 +72,16 @@ button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.08); }
 button.wide { width: 100%; margin: 4px 0 10px; }
 .right { margin-left: auto; }
 
-.sketch-editor { position: absolute; inset: 0; display: flex; flex-direction: column; background: #fbfcfe; z-index: 5; }
-.sketch-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--panel); }
-.sketch-canvas { flex: 1; width: 100%; min-height: 0; touch-action: none; user-select: none; cursor: default; }
+/* The editor floats over the 3D view: the canvas covers the whole stage so its center is the camera's. */
+.sketch-editor { position: absolute; inset: 0; z-index: 5; }
+.sketch-bar { position: absolute; top: 0; left: 0; right: 0; z-index: 1; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter: blur(4px); }
+.sketch-canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; user-select: none; cursor: default; }
 .sketch-canvas.tool-line, .sketch-canvas.tool-rect, .sketch-canvas.tool-circle, .sketch-canvas.tool-arc { cursor: crosshair; }
-.sketch-status { display: flex; gap: 14px; padding: 4px 10px; border-top: 1px solid var(--border); background: var(--panel); font-size: 12px; color: var(--muted); }
+.sketch-status { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; display: flex; gap: 14px; padding: 4px 10px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 92%, transparent); font-size: 12px; color: var(--muted); }
 .sketch-status .ok { color: #1f9d55; font-weight: 600; }
 .glyph-icon { display: inline-block; min-width: 12px; text-align: center; font-weight: 600; }
 
-.sketch-canvas .grid { stroke: #e9edf3; stroke-width: 1; }
+.sketch-canvas .grid { stroke: #9aa7ba; stroke-opacity: 0.22; stroke-width: 1; }
 .sketch-canvas .axis-x { stroke: #e5484d; stroke-opacity: 0.45; stroke-width: 1.2; }
 .sketch-canvas .axis-y { stroke: #30a46c; stroke-opacity: 0.45; stroke-width: 1.2; }
 .sketch-canvas .curve { stroke: #1d2633; stroke-width: 2; fill: none; }

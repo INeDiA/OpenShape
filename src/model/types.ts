@@ -2,6 +2,7 @@
 // the kernel replays them from scratch to produce the current solid.
 
 import type { SketchData } from "../sketch/model";
+import type { Frame } from "./frame";
 
 export type PlaneName = "XY" | "XZ" | "YZ";
 
@@ -182,6 +183,8 @@ export interface SketchPreview {
   segments: Float32Array;
   /** For sketches on a face: the face's edges as 2D segment pairs in sketch coordinates. */
   reference?: Float32Array;
+  /** The sketch plane in world space (where the sketch's local coordinates live). */
+  frame: Frame;
 }
 
 export type KernelRequest =

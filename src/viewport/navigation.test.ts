@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three";
-import { CameraNav } from "./navigation";
+import { CameraNav, placeSketchCamera } from "./navigation";
 
 // Minimal stand-ins: the math only needs a target and a dom size.
 function setup(pick: THREE.Vector3 | null = null) {
@@ -64,5 +64,23 @@ describe("camera navigation", () => {
     for (let i = 0; i < 200; i++) nav.orbit(0, -50); // keep pitching up
     const polar = camera.position.clone().sub(controls.target).angleTo(new THREE.Vector3(0, 0, 1));
     expect(polar).toBeGreaterThan(0.005);
+  });
+});
+
+describe("sketch camera", () => {
+  it("maps plane coordinates to the screen at the editor's scale", () => {
+    const camera = new THREE.PerspectiveCamera(40, 1.5, 0.1, 10000);
+    camera.updateProjectionMatrix();
+    const target = new THREE.Vector3();
+    // Front plane (XZ): local x = world X, local y = world Z, normal towards the viewer (-Y).
+    const frame = { origin: [0, 0, 5] as [number, number, number], x: [1, 0, 0] as [number, number, number], y: [0, 0, 1] as [number, number, number], n: [0, -1, 0] as [number, number, number] };
+    const h = 600, w = 900, scale = 4;
+    placeSketchCamera(camera, target, { frame, cx: 10, cy: 2, scale }, h);
+    camera.updateMatrixWorld();
+    // Plane point (cx + 25, cy + 10) should be 25*scale px right and 10*scale px up of center.
+    const p = new THREE.Vector3(10 + 25, 0, 5 + 2 + 10).project(camera);
+    expect(((p.x + 1) / 2) * w - w / 2).toBeCloseTo(25 * scale, 6);
+    // Screen y grows downwards: 10 mm up is 40 px above the center.
+    expect(((1 - p.y) / 2) * h - h / 2).toBeCloseTo(-10 * scale, 6);
   });
 });

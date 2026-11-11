@@ -8,6 +8,7 @@
 
 import * as THREE from "three";
 import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import type { Frame } from "../model/frame";
 
 export type ViewName = "top" | "front" | "right" | "iso";
 export type NavMode = "auto" | "mouse" | "trackpad";
@@ -62,7 +63,7 @@ export class CameraNav {
     return true;
   }
 
-  private animateTo(pos: THREE.Vector3, target: THREE.Vector3, duration = 320) {
+  animateTo(pos: THREE.Vector3, target: THREE.Vector3, duration = 320) {
     this.tween = { fromPos: this.camera.position.clone(), fromTarget: this.controls.target.clone(), toPos: pos, toTarget: target, start: performance.now(), duration };
   }
 
@@ -165,4 +166,23 @@ export class CameraNav {
     const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, this.controls.target);
     return ray.ray.intersectPlane(plane, new THREE.Vector3());
   }
+}
+
+export interface SketchCamera {
+  frame: Frame;
+  cx: number;
+  cy: number;
+  scale: number;
+}
+
+/** Puts the camera on the sketch plane's normal so plane coordinates map to the screen at `scale` px/mm. */
+export function placeSketchCamera(camera: THREE.PerspectiveCamera, target: THREE.Vector3, sc: SketchCamera, viewHeight: number) {
+  const { origin: o, x, y, n } = sc.frame;
+  target.set(o[0] + x[0] * sc.cx + y[0] * sc.cy, o[1] + x[1] * sc.cx + y[1] * sc.cy, o[2] + x[2] * sc.cx + y[2] * sc.cy);
+  // Pixels per mm on the plane: viewHeight / (2 d tan(fov / 2)).
+  const d = viewHeight / (2 * sc.scale * Math.tan((camera.fov * Math.PI) / 360));
+  camera.position.set(target.x + n[0] * d, target.y + n[1] * d, target.z + n[2] * d);
+  camera.up.set(y[0], y[1], y[2]);
+  camera.lookAt(target);
+  camera.updateMatrixWorld();
 }

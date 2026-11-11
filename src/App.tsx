@@ -193,6 +193,9 @@ export function App() {
   };
 
   const editingSketch = doc.features.find((f): f is SketchFeature => f.id === editingSketchId && f.type === "sketch") ?? null;
+  // The 2D view of the sketch editor; the 3D camera follows it onto the sketch plane.
+  const [sketchView, setSketchView] = useState<{ cx: number; cy: number; scale: number } | null>(null);
+  const editingFrame = editingSketch ? sketchPreviews.find((p) => p.id === editingSketch.id)?.frame : undefined;
   const startSketchEdit = (id: string) => {
     if (solverState !== "ready") return;
     setSelectedId(id);
@@ -519,6 +522,8 @@ export function App() {
           rigidPreview={manip.rigid}
           fitKey={fitKey}
           ghost={manip.ghost}
+          sketchCamera={editingSketch && sketchView && editingFrame ? { frame: editingFrame, ...sketchView } : null}
+          hiddenSketchId={editingSketch?.id ?? null}
         />
         {editingSketch && (
           <SketchEditor
@@ -527,7 +532,11 @@ export function App() {
             scope={resolution.scope}
             reference={sketchPreviews.find((p) => p.id === editingSketch.id)?.reference}
             onCommit={(sketch) => update((cur) => updateFeature(cur, editingSketch.id, { sketch }))}
-            onExit={() => setEditingSketchId(null)}
+            onExit={() => {
+              setEditingSketchId(null);
+              setSketchView(null);
+            }}
+            onViewChange={setSketchView}
           />
         )}
         {pickingFeature && (

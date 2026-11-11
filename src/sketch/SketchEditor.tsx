@@ -21,6 +21,8 @@ interface Props {
   reference?: Float32Array;
   onCommit: (sketch: SketchData) => void;
   onExit: () => void;
+  /** Reports the 2D view (center in sketch coordinates, pixels per mm) so the 3D camera can follow it. */
+  onViewChange?: (view: { cx: number; cy: number; scale: number }) => void;
 }
 
 interface View {
@@ -72,7 +74,7 @@ function curveEndingAt(s: SketchData, id: string): string | null {
 
 const fmt = (v: number) => (Math.abs(v - Math.round(v)) < 1e-6 ? String(Math.round(v)) : v.toFixed(2));
 
-export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Props) {
+export function SketchEditor({ feature, scope, reference, onCommit, onExit, onViewChange }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
   const [sketch, setSketch] = useState<SketchData>(feature.sketch);
@@ -132,6 +134,10 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
     const w = Math.max(b.maxX - b.minX, 10), h = Math.max(b.maxY - b.minY, 10);
     setView({ cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2, scale: Math.min(size.w / w, size.h / h) * 0.55 });
   }, [size, sketch]);
+
+  useEffect(() => {
+    onViewChange?.(view);
+  }, [view, onViewChange]);
 
   const toScreen = useCallback((x: number, y: number) => [size.w / 2 + (x - view.cx) * view.scale, size.h / 2 - (y - view.cy) * view.scale] as const, [size, view]);
   const toWorld = useCallback((sx: number, sy: number) => ({ x: view.cx + (sx - size.w / 2) / view.scale, y: view.cy - (sy - size.h / 2) / view.scale }), [size, view]);
@@ -1053,7 +1059,7 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit }: Pr
       {edit && (
         <input
           className="dim-input"
-          style={{ left: edit.sx, top: edit.sy + ((svgRef.current?.parentElement?.querySelector(".sketch-bar") as HTMLElement | null)?.offsetHeight ?? 0) }}
+          style={{ left: edit.sx, top: edit.sy }}
           autoFocus
           value={edit.text}
           onChange={(e) => setEdit({ ...edit, text: e.target.value })}

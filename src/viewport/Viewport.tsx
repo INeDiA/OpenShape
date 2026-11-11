@@ -6,7 +6,7 @@ import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import type { MeshData, SketchPreview } from "../model/types";
 import type { Vec3 } from "../model/frame";
-import { CameraNav, type NavMode, type ViewName } from "./navigation";
+import { CameraNav, placeSketchCamera, type NavMode, type SketchCamera, type ViewName } from "./navigation";
 
 const NAV_MODE_KEY = "openshape.navMode";
 const readNavMode = (): NavMode => {
@@ -61,7 +61,16 @@ interface Props {
   ghost: { mesh: MeshData; face: string; distance: number } | null;
   /** Changing this number re-frames the model (new/opened document). */
   fitKey: number;
+  /**
+   * While sketching: the camera looks straight at the sketch plane, centered
+   * on (cx, cy) in plane coordinates, at `scale` pixels per mm, so the 2D
+   * editor drawn on top lines up with the model.
+   */
+  sketchCamera?: SketchCamera | null;
+  /** Sketch not drawn in 3D (the one being edited draws itself). */
+  hiddenSketchId?: string | null;
 }
+
 
 const mat = (color: number) => new THREE.MeshStandardMaterial({ color, metalness: 0.1, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
 const BODY = mat(0xb8c4d6);
@@ -360,9 +369,27 @@ export function Viewport(props: Props) {
 
     const tmp = new THREE.Vector3();
     let raf = 0;
+    // Camera pose before sketching, restored afterwards.
+    let saved: { pos: THREE.Vector3; target: THREE.Vector3 } | null = null;
     const loop = () => {
-      nav.update(performance.now());
-      controls.update();
+      const sc = latest.current.sketchCamera;
+      if (sc) {
+        if (!saved) {
+          saved = { pos: camera.position.clone(), target: controls.target.clone() };
+          controls.enabled = false;
+          nav.animateTo(camera.position.clone(), controls.target.clone(), 1); // cancels any running tween
+        }
+        placeSketchCamera(camera, controls.target, sc, el.clientHeight || 1);
+      } else {
+        if (saved) {
+          camera.up.set(0, 0, 1);
+          controls.enabled = true;
+          nav.animateTo(saved.pos, saved.target);
+          saved = null;
+        }
+        nav.update(performance.now());
+        controls.update();
+      }
       // Keep depth precision reasonable at any zoom.
       const d = camera.position.distanceTo(controls.target);
       camera.near = Math.max(0.01, d / 2000);
@@ -440,6 +467,7 @@ export function Viewport(props: Props) {
     }
 
     for (const sk of sketches) {
+      if (sk.id === props.hiddenSketchId) continue;
       const lg = new THREE.BufferGeometry();
       lg.setAttribute("position", new THREE.BufferAttribute(sk.segments, 3));
       s.model.add(new THREE.LineSegments(lg, sk.id === selectedSketchId ? SKETCH_SEL : SKETCH));
@@ -447,7 +475,19 @@ export function Viewport(props: Props) {
     rebuildOverlay(s, selectedEdges);
     // selectedEdges handled by its own effect
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mesh, sketches, selectedSketchId]);
+  }, [mesh, sketches, selectedSketchId, props.hiddenSketchId]);
+
+  // The model turns translucent while sketching, so the sketch reads on top of it.
+  const sketching = !!props.sketchCamera;
+  useEffect(() => {
+    for (const m of [BODY, BODY_SELECTED]) {
+      m.transparent = sketching;
+      m.opacity = sketching ? 0.45 : 1;
+      m.needsUpdate = true;
+    }
+    EDGE.transparent = sketching;
+    EDGE.opacity = sketching ? 0.5 : 1;
+  }, [sketching]);
 
   useEffect(() => {
     if (state.current) rebuildOverlay(state.current, selectedEdges);
@@ -760,3 +800,4 @@ function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
     </div>
   );
 }
+

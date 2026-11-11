@@ -368,11 +368,11 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
         const owner = bodies.withFace(f.face);
         const { face, frame } = planarFaceFrame(owner.shape, f.face, f.offset);
         sketches.set(f.id, { feature: f, frame });
-        previews.push({ id: f.id, segments: sketchSegments(f, frame), reference: faceReference(face, frame) });
+        previews.push({ id: f.id, segments: sketchSegments(f, frame), reference: faceReference(face, frame), frame });
       } else {
         const frame = standardFrame(f.plane, f.offset);
         sketches.set(f.id, { feature: f, frame });
-        previews.push({ id: f.id, segments: sketchSegments(f, frame) });
+        previews.push({ id: f.id, segments: sketchSegments(f, frame), frame });
       }
       return;
     }
