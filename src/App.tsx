@@ -27,6 +27,7 @@ import { SketchEditor } from "./sketch/SketchEditor";
 import { loadSolver, solve, solverReady } from "./sketch/solver";
 import { resolveDocument, type SketchSolver } from "./model/resolve";
 import { VariablesPanel } from "./ui/VariablesPanel";
+import { DrawingWorkspace } from "./drawing/DrawingWorkspace";
 import { useManipulation } from "./ui/useManipulation";
 import { EXPORT_FORMATS, exportMesh, type ExportFormat } from "./io/exporters";
 import type { FileMeta } from "./io/fileFormat";
@@ -295,6 +296,9 @@ export function App() {
   }, [status, resolution]);
   const errors = [...fullStatus.values()].filter((s) => !s.ok);
 
+  // Model (3D) or the 2D drawing sheet.
+  const [mode, setMode] = useState<"model" | "drawing">("model");
+
   const add = (f: Feature) => {
     commit({ ...doc, features: [...doc.features, f] });
     setSelectedId(f.id);
@@ -502,7 +506,15 @@ export function App() {
             {dirty && <span className="dirty">•</span>}
           </span>
         </div>
-        <div className="group">
+        <div className="group mode-switch">
+          <button className={mode === "model" ? "active" : ""} onClick={() => setMode("model")} title="Model the part in 3D">
+            ◧ Model
+          </button>
+          <button className={mode === "drawing" ? "active" : ""} disabled={!!editingSketch} onClick={() => (setMode("drawing"), manip.clear())} title="2D technical drawing of the model: views, dimensions, PDF/DXF export">
+            📐 Drawing
+          </button>
+        </div>
+        <div className={`group${mode === "drawing" ? " hidden" : ""}`}>
           <button
             disabled={solverState !== "ready" || !!editingSketch}
             onClick={newSketch}
@@ -516,7 +528,7 @@ export function App() {
             <option value="YZ">YZ (right)</option>
           </select>
         </div>
-        <div className={`group${editingSketch ? " hidden" : ""}`}>
+        <div className={`group${editingSketch || mode === "drawing" ? " hidden" : ""}`}>
           <button disabled={!baseSketch} onClick={() => add(makeExtrude(doc, baseSketch!.id, hasBody(doc) ? "join" : "new"))}>
             ⬆ Extrude
           </button>
@@ -540,7 +552,7 @@ export function App() {
           <button disabled={!hasBody(doc)} onClick={() => add(makeEdgeTreatment(doc, "fillet"))}>◜ Fillet</button>
           <button disabled={!hasBody(doc)} onClick={() => add(makeEdgeTreatment(doc, "chamfer"))}>◸ Chamfer</button>
         </div>
-        <div className={`group${editingSketch ? " hidden" : ""}`}>
+        <div className={`group${editingSketch || mode === "drawing" ? " hidden" : ""}`}>
           <button
             disabled={!singlePlanarFace}
             title="Move the selected planar face along its normal"
@@ -636,6 +648,10 @@ export function App() {
         />
       </div>
 
+      {mode === "drawing" ? (
+        <DrawingWorkspace doc={doc} commit={commit} project={(d, dirs) => kernel.current!.project(d, dirs)} name={baseName(fileName)} flash={flash} />
+      ) : (
+      <>
       <main className="stage">
         <Viewport
           mesh={mesh}
@@ -748,6 +764,8 @@ export function App() {
         onPickNeutral={() => setRepickNeutral(true)}
         pickingNeutral={pickNeutral}
       />
+      </>
+      )}
 
       <footer className="statusbar">
         <span title={kernelThreads > 1 ? "Multi-threaded OpenCascade: Booleans run in parallel" : "Single-threaded OpenCascade (the page isn't cross-origin isolated)"}>

@@ -1,4 +1,4 @@
-import type { Document, KernelRequest, KernelResponse, Measurement, MeasureSelection } from "../model/types";
+import type { Document, KernelRequest, KernelResponse, Measurement, MeasureSelection, ViewDir, ViewProjection } from "../model/types";
 
 type Evaluated = Extract<KernelResponse, { kind: "evaluated" }>;
 
@@ -14,6 +14,7 @@ export class KernelClient {
   private queued: { doc: Document; stopBefore?: string; preview?: boolean } | null = null;
   private pendingExports = new Map<number, (r: Extract<KernelResponse, { kind: "exported" }>) => void>();
   private pendingMeasures = new Map<number, (r: Extract<KernelResponse, { kind: "measured" }>) => void>();
+  private pendingProjections = new Map<number, (r: Extract<KernelResponse, { kind: "projected" }>) => void>();
 
   onReady: (threads: number) => void = () => {};
   onInitError: (e: string) => void = () => {};
@@ -42,6 +43,10 @@ export class KernelClient {
             this.queued = null;
             this.dispatch(q.doc, q.stopBefore, q.preview);
           } else this.onBusy(false);
+          break;
+        case "projected":
+          this.pendingProjections.get(msg.seq)?.(msg);
+          this.pendingProjections.delete(msg.seq);
           break;
         case "measured":
           this.pendingMeasures.get(msg.seq)?.(msg);
@@ -86,6 +91,15 @@ export class KernelClient {
     return new Promise((resolve, reject) => {
       this.pendingMeasures.set(seq, (r) => (r.error || !r.measurement ? reject(new Error(r.error ?? "No result")) : resolve(r.measurement)));
       this.send({ kind: "measure", seq, doc, selection });
+    });
+  }
+
+  /** Hidden-line projections of the final model, one per view direction. */
+  project(doc: Document, dirs: ViewDir[]): Promise<ViewProjection[]> {
+    const seq = ++this.seq;
+    return new Promise((resolve, reject) => {
+      this.pendingProjections.set(seq, (r) => (r.error || !r.views ? reject(new Error(r.error ?? "No result")) : resolve(r.views)));
+      this.send({ kind: "project", seq, doc, dirs });
     });
   }
 

@@ -56,7 +56,7 @@ segnalate nella history senza bloccare le altre.
 13. ~~Misure~~: distanza, angolo, area, lunghezza, volume e baricentro dei corpi
 14. ~~Raccordi d'angolo con raggi diversi~~: vertex blend con arretramento (setback) dove OCCT lascerebbe una superficie d'angolo a uncino; sfere e tori di OCCT restano
 15. ~~Loft, sweep, draft~~, più taglio passante (*through all*) nell'extrude
-16. Disegni tecnici 2D (viste, quote, export PDF/DXF)
+16. ~~Disegni tecnici 2D~~: foglio A4–A1 con viste standard a linee nascoste, scala, proiezione europea o americana, quote (orizzontali, verticali, allineate, diametri, raggi), cartiglio, export PDF, SVG e DXF
 17. App desktop (Tauri) e repo pubblico con CI
 
 Già fatto fuori sequenza: ~~selezione delle regioni di sketch sul modello~~ con freccia di estrusione (operazione scelta dal verso: cut, join o nuovo corpo) e anello per il revolve attorno a una linea dello sketch.

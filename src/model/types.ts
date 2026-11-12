@@ -203,6 +203,68 @@ export interface Variable {
 export interface Document {
   variables: Variable[];
   features: Feature[];
+  /** 2D technical drawing of the model (one sheet). */
+  drawing?: DrawingSheet;
+}
+
+// ---- 2D drawings ----------------------------------------------------------
+
+/** Standard view directions; "iso" looks from front-right-top. */
+export type ViewDir = "front" | "back" | "top" | "bottom" | "left" | "right" | "iso";
+
+export interface DrawingView {
+  id: string;
+  dir: ViewDir;
+  /** Centre of the view on the sheet, paper mm from the bottom-left corner. */
+  x: number;
+  y: number;
+  /** Draw hidden edges dashed. */
+  hidden: boolean;
+}
+
+export type DimensionKind = "horizontal" | "vertical" | "aligned" | "diameter" | "radius";
+
+/**
+ * A dimension on a view. Points are in the view's own coordinates (model mm,
+ * x right, y up) and re-snap to the nearest vertex or circle when the model changes.
+ */
+export interface DrawingDimension {
+  id: string;
+  view: string;
+  kind: DimensionKind;
+  a: [number, number];
+  /** Second point (linear kinds). */
+  b?: [number, number];
+  /** Diameter/radius: radius of the circle picked (tells concentric circles apart). */
+  r?: number;
+  /** Linear: distance of the dimension line from the measured points (paper mm, signed). Circles: angle of the leader (degrees). */
+  offset: number;
+}
+
+export interface DrawingSheet {
+  size: "A4" | "A3" | "A2" | "A1";
+  orientation: "landscape" | "portrait";
+  /** Paper mm per model mm (2 = 2:1, 0.5 = 1:2). */
+  scale: number;
+  /** "first": ISO, Europe (top view below the front); "third": ASME (top view above). */
+  projection: "first" | "third";
+  title: string;
+  author: string;
+  views: DrawingView[];
+  dimensions: DrawingDimension[];
+}
+
+/** Hidden-line projection of the model for one view (view coordinates, model mm). */
+export interface ViewProjection {
+  dir: ViewDir;
+  /** Segments as x1, y1, x2, y2, … */
+  visible: Float32Array;
+  hidden: Float32Array;
+  /** Snap points: ends of edges. */
+  points: [number, number][];
+  /** Circles and arcs (for diameter and radius dimensions). */
+  circles: { cx: number; cy: number; r: number }[];
+  bounds: { minX: number; minY: number; maxX: number; maxY: number } | null;
 }
 
 // ---- Kernel protocol -------------------------------------------------------
@@ -271,7 +333,8 @@ export interface Measurement {
 export type KernelRequest =
   | { kind: "evaluate"; seq: number; doc: Document; stopBefore?: string; preview?: boolean }
   | { kind: "measure"; seq: number; doc: Document; selection: MeasureSelection }
-  | { kind: "export"; seq: number; doc: Document; format: "step" | "mesh" };
+  | { kind: "export"; seq: number; doc: Document; format: "step" | "mesh" }
+  | { kind: "project"; seq: number; doc: Document; dirs: ViewDir[] };
 
 export type KernelResponse =
   /** `threads`: OCCT worker threads available to Booleans (1 = single-threaded build). */
@@ -287,4 +350,5 @@ export type KernelResponse =
       ms: number;
     }
   | { kind: "measured"; seq: number; measurement?: Measurement; error?: string }
+  | { kind: "projected"; seq: number; views?: ViewProjection[]; error?: string }
   | { kind: "exported"; seq: number; blob?: Blob; mesh?: { vertices: Float32Array; triangles: Uint32Array }; error?: string };

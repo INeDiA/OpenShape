@@ -6,6 +6,7 @@ import { setBooleanParallel } from "./booleans";
 import type { KernelRequest, KernelResponse } from "../model/types";
 import { evaluate, meshBody } from "./evaluate";
 import { measureSelection } from "./measure";
+import { projectView } from "./projection";
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 const post = (msg: KernelResponse, transfer: Transferable[] = []) => ctx.postMessage(msg, transfer);
@@ -84,6 +85,21 @@ async function handleMeasure(req: Extract<KernelRequest, { kind: "measure" }>) {
   }
 }
 
+async function handleProject(req: Extract<KernelRequest, { kind: "project" }>) {
+  try {
+    const { body, ownsBody } = await evaluate(req.doc);
+    if (!body) return post({ kind: "projected", seq: req.seq, views: [] });
+    try {
+      const views = req.dirs.map((d) => projectView(body.shape, d));
+      post({ kind: "projected", seq: req.seq, views }, views.flatMap((v) => [v.visible.buffer, v.hidden.buffer]));
+    } finally {
+      if (ownsBody) body.shape.delete();
+    }
+  } catch (e) {
+    post({ kind: "projected", seq: req.seq, error: String(e) });
+  }
+}
+
 // Requests run one at a time: evaluation is async (imports) and must not interleave.
 let queue: Promise<void> = Promise.resolve();
 ctx.onmessage = (ev: MessageEvent<KernelRequest>) => {
@@ -93,5 +109,6 @@ ctx.onmessage = (ev: MessageEvent<KernelRequest>) => {
     if (req.kind === "evaluate") await handleEvaluate(req);
     else if (req.kind === "export") await handleExport(req);
     else if (req.kind === "measure") await handleMeasure(req);
+    else if (req.kind === "project") await handleProject(req);
   });
 };

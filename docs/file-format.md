@@ -158,6 +158,22 @@ Trigonometric functions use degrees. Numbers may carry a unit suffix:
 `mm`, `cm`, `m`, `in` for lengths and `deg`, `rad` for angles (`2cm + 5mm` is `25`).
 Variables may reference each other in any order; cycles are errors.
 
+### Drawing
+
+`drawing` (optional) is a 2D technical drawing of the model, one sheet:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `size` | string | `A4`, `A3`, `A2`, `A1` |
+| `orientation` | string | `landscape` or `portrait` |
+| `scale` | number | Paper mm per model mm (2 = 2:1, 0.5 = 1:2) |
+| `projection` | string | `first` (ISO: top view below the front) or `third` (top view above) |
+| `title`, `author` | string | Title block fields |
+| `views` | array | `{ id, dir, x, y, hidden }`: `dir` is `front`, `back`, `top`, `bottom`, `left`, `right` or `iso`; `x`, `y` place the centre of the view on the sheet (paper mm from the bottom-left corner); `hidden` draws hidden edges dashed. |
+| `dimensions` | array | `{ id, view, kind, a, b?, r?, offset }`: `kind` is `horizontal`, `vertical`, `aligned`, `diameter` or `radius`; `a` and `b` are points in the view's coordinates (model mm, x right, y up), re-snapped to the nearest vertex (or circle centre) when the model changes; `r` is the radius of the circle a diameter or radius was put on; `offset` is the distance of the dimension line from the points (paper mm) or, for circles, the angle of the leader (degrees). |
+
+Views are hidden-line projections of the final model, recomputed on load.
+
 ## Persistent names
 
 Fillets and chamfers refer to edges by **persistent names** rather than kernel ids,

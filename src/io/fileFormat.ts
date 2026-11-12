@@ -1,7 +1,7 @@
 // The .openshape file format: UTF-8 JSON, documented in docs/file-format.md.
 // Bump FORMAT_VERSION on breaking changes and add a step to `migrate`.
 
-import type { Document, Feature, Variable } from "../model/types";
+import type { Document, DrawingSheet, Feature, Variable } from "../model/types";
 import type { SkConstraint, SkEntity } from "../sketch/model";
 
 export const FORMAT_NAME = "openshape";
@@ -187,7 +187,48 @@ export function validateDocument(raw: unknown): Document {
     if (typeof f.suppressed !== "boolean") f.suppressed = false;
   }
 
-  return { variables: variables as Variable[], features: raw.features as Feature[] };
+  const doc: Document = { variables: variables as Variable[], features: raw.features as Feature[] };
+  if (raw.drawing !== undefined) doc.drawing = validateDrawing(raw.drawing);
+  return doc;
+}
+
+const VIEW_DIRS = ["front", "back", "top", "bottom", "left", "right", "iso"];
+const DIM_KINDS = ["horizontal", "vertical", "aligned", "diameter", "radius"];
+const pt = (v: unknown, at: string) => need(Array.isArray(v) && v.length === 2 && v.every((x) => typeof x === "number" && Number.isFinite(x)), `${at} must be [x, y]`);
+
+function validateDrawing(raw: unknown): DrawingSheet {
+  need(isObj(raw), "drawing is invalid");
+  need(["A4", "A3", "A2", "A1"].includes(raw.size as string), "drawing.size is invalid");
+  need(raw.orientation === "landscape" || raw.orientation === "portrait", "drawing.orientation is invalid");
+  num(raw.scale, "drawing.scale");
+  need((raw.scale as number) > 0, "drawing.scale must be > 0");
+  need(raw.projection === "first" || raw.projection === "third", "drawing.projection is invalid");
+  if (typeof raw.title !== "string") raw.title = "";
+  if (typeof raw.author !== "string") raw.author = "";
+  need(Array.isArray(raw.views) && Array.isArray(raw.dimensions), "drawing needs views and dimensions");
+  const views = new Set<string>();
+  for (const [i, v] of (raw.views as unknown[]).entries()) {
+    const at = `drawing.views[${i}]`;
+    need(isObj(v), `${at} is invalid`);
+    str(v.id, `${at}.id`);
+    need(VIEW_DIRS.includes(v.dir as string), `${at}.dir is invalid`);
+    num(v.x, `${at}.x`);
+    num(v.y, `${at}.y`);
+    if (typeof v.hidden !== "boolean") v.hidden = true;
+    views.add(v.id as string);
+  }
+  for (const [i, d] of (raw.dimensions as unknown[]).entries()) {
+    const at = `drawing.dimensions[${i}]`;
+    need(isObj(d), `${at} is invalid`);
+    str(d.id, `${at}.id`);
+    need(views.has(d.view as string), `${at} references a missing view`);
+    need(DIM_KINDS.includes(d.kind as string), `${at}.kind is invalid`);
+    pt(d.a, `${at}.a`);
+    if (d.kind !== "diameter" && d.kind !== "radius") pt(d.b, `${at}.b`);
+    num(d.offset, `${at}.offset`);
+    if (d.r !== undefined) num(d.r, `${at}.r`);
+  }
+  return raw as unknown as DrawingSheet;
 }
 
 function validateSketch(raw: unknown, at: string) {

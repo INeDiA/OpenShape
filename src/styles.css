@@ -188,3 +188,19 @@ button.wide { width: 100%; margin: 4px 0 10px; }
 .section-row { display: flex; gap: 6px; align-items: flex-start; }
 .section-row .field { flex: 1; }
 .section-row > button { padding: 3px 8px; }
+
+/* Drawing mode: the sheet on a grey desk, tools on top. */
+.drawing-stage { display: flex; flex-direction: column; background: #e9ecf1; }
+.drawing-tools { display: flex; gap: 6px; align-items: center; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border); }
+.drawing-tools .muted { color: var(--muted); margin-left: 6px; }
+.sheet { flex: 1; min-height: 0; width: 100%; display: block; cursor: default; touch-action: none; user-select: none; }
+.sheet .paper { filter: drop-shadow(0 1px 4px rgba(0, 0, 0, 0.18)); }
+.sheet.dimensioning { cursor: crosshair; }
+.sheet .dim { cursor: move; }
+.drawing-panel .drawing-selection { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+.drawing-panel .drawing-export-title { margin-top: 16px; }
+.drawing-export { display: flex; gap: 6px; margin-bottom: 8px; }
+.drawing-export button { flex: 1; }
+.drawing-panel button.wide { width: 100%; margin-bottom: 8px; }
+.mode-switch button { min-width: 0; }
+.drawing-stage .picking-banner { top: auto; bottom: 12px; }
