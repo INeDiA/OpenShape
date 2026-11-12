@@ -54,7 +54,7 @@ segnalate nella history senza bloccare le altre.
 11. ~~Gestione della history~~: riordino delle feature, eliminazione in blocco di quelle in errore, undo persistente, rinomina
 12. ~~Sketch nella vista 3D, archi tangenti, ellissi, spline, trim e offset~~
 13. ~~Misure~~: distanza, angolo, area, lunghezza, volume e baricentro dei corpi
-14. Raccordi d'angolo con raggi diversi: vertex blend / setback invece dell'intaglio che OCCT produce quando tre raccordi di raggio diverso si incontrano in un vertice
+14. ~~Raccordi d'angolo con raggi diversi~~: vertex blend con arretramento (setback) dove OCCT lascerebbe una superficie d'angolo a uncino; sfere e tori di OCCT restano
 15. Loft, sweep, draft
 16. Disegni tecnici 2D (viste, quote, export PDF/DXF)
 17. App desktop (Tauri) e repo pubblico con CI
