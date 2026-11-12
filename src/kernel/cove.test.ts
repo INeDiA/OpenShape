@@ -9,7 +9,7 @@ import type { Document, ExtrudeFeature } from "../model/types";
 import { evaluate } from "./evaluate";
 import { nameEdges } from "./naming";
 import { meshBody } from "./evaluate";
-import { covePreview } from "../viewport/meshGeom";
+import { covePreview, filletPreview } from "../viewport/meshGeom";
 
 const wasm = fileURLToPath(new URL("../../node_modules/replicad-opencascadejs/dist/replicad_single.wasm", import.meta.url));
 beforeAll(async () => {
@@ -83,6 +83,40 @@ describe("cove", () => {
       expect(Math.hypot(15 - y, 20 - z)).toBeCloseTo(4, 6);
       expect(y).toBeLessThanOrEqual(15 + 1e-6);
       expect(z).toBeLessThanOrEqual(20 + 1e-6);
+    }
+  });
+
+  it("previews a new radius on a circular edge (the rim of a hole)", async () => {
+    const { doc, ex, names } = await block(true);
+    const holeExtrude = doc.features[3].id;
+    const rim = names.find((n) => n.includes(`${holeExtrude}:side:`) && n.includes(`${ex.id}:end`))!;
+    const cv = makeCove(doc, [rim], 2);
+    const r = await evaluate({ ...doc, features: [...doc.features, cv] });
+    const mesh = meshBody(r.body!, r.faceBody);
+    const faces = mesh.faceNames.filter((n) => n.startsWith(`${cv.id}:cove:`));
+    expect(covePreview(mesh, faces, rim, 3)).toBeNull(); // without the current radius it can't rebuild the rim
+    const p = covePreview(mesh, faces, rim, 3, 8, 2)!;
+    expect(p.arc.length).toBeGreaterThan(0);
+    for (let i = 0; i < p.arc.length; i += 3) {
+      const rho = Math.hypot(p.arc[i], p.arc[i + 1]), z = p.arc[i + 2];
+      // On the tube of radius 3 around the rim (circle of radius 8 at z = 20), in the material.
+      expect(Math.hypot(rho - 8, z - 20)).toBeCloseTo(3, 1);
+      expect(rho).toBeGreaterThan(8 - 0.05);
+      expect(z).toBeLessThan(20 + 0.05);
+    }
+  });
+
+  it("previews a fillet on a circular edge with the local normals of the curved face", async () => {
+    const { doc, ex, r, names } = await block(true);
+    const holeExtrude = doc.features[3].id;
+    const rim = names.find((n) => n.includes(`${holeExtrude}:side:`) && n.includes(`${ex.id}:end`))!;
+    const mesh = meshBody(r.body!, r.faceBody);
+    const p = filletPreview(mesh, [rim], 2);
+    expect(p.arc.length).toBeGreaterThan(0);
+    for (let i = 0; i < p.arc.length; i += 3) {
+      const rho = Math.hypot(p.arc[i], p.arc[i + 1]), z = p.arc[i + 2];
+      // Rolling-ball centre on the circle rho = 10, z = 18.
+      expect(Math.hypot(rho - 10, z - 18)).toBeCloseTo(2, 1);
     }
   });
 });

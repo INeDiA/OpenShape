@@ -173,6 +173,12 @@ function edgeIsConvex(m: MeshData, A: { p: Vec3; n: Vec3 }, B: { p: Vec3; n: Vec
   return bodyContaining(m, [p[0] - bis[0] * 0.05, p[1] - bis[1] * 0.05, p[2] - bis[2] * 0.05]) !== null;
 }
 
+/** Whether there's material just inside the edge at `p`, against the bisector of the two outward normals (a convex edge). */
+function materialInside(m: MeshData, p: Vec3, nA: Vec3, nB: Vec3): boolean {
+  const bis = unit([nA[0] + nB[0], nA[1] + nB[1], nA[2] + nB[2]]);
+  return bodyContaining(m, [p[0] - bis[0] * 0.05, p[1] - bis[1] * 0.05, p[2] - bis[2] * 0.05]) !== null;
+}
+
 /** Möller–Trumbore, forward hits only. */
 function rayHitsTriangle(o: Vec3, d: Vec3, a: Vec3, b: Vec3, c: Vec3): boolean {
   const e1 = sub(b, a), e2 = sub(c, a);
@@ -203,15 +209,17 @@ export interface FilletPreview {
  * faces (on the inside of a convex edge, the outside of a concave one), its
  * normals, and the bands it takes off each face.
  */
-function roundSegments(segs: [Vec3, Vec3][], nA: Vec3, nB: Vec3, convex: boolean, radius: number, steps: number, out: { arc: number[]; normals: number[]; bands: number[] }) {
-  const d = dot(nA, nB);
+function roundSegments(segs: [Vec3, Vec3][], normalsAt: (p: Vec3) => [Vec3, Vec3], convex: boolean, radius: number, steps: number, out: { arc: number[]; normals: number[]; bands: number[] }) {
   const s = convex ? -1 : 1;
-  // Center at distance r from both planes: c = p + s r (nA + nB) / (1 + nA·nB).
-  const k = (s * radius) / (1 + d);
-  const uA: Vec3 = [-s * nA[0], -s * nA[1], -s * nA[2]], uB: Vec3 = [-s * nB[0], -s * nB[1], -s * nB[2]];
-  const ang = Math.acos(Math.max(-1, Math.min(1, dot(uA, uB))));
-  const sin = Math.sin(ang) || 1;
   const section = (p: Vec3): { pts: Vec3[]; nrm: Vec3[] } => {
+    // Local face normals (curved faces turn along the edge).
+    const [nA, nB] = normalsAt(p);
+    const d = dot(nA, nB);
+    // Center at distance r from both faces: c = p + s r (nA + nB) / (1 + nA·nB).
+    const k = (s * radius) / (1 + d);
+    const uA: Vec3 = [-s * nA[0], -s * nA[1], -s * nA[2]], uB: Vec3 = [-s * nB[0], -s * nB[1], -s * nB[2]];
+    const ang = Math.acos(Math.max(-1, Math.min(1, dot(uA, uB))));
+    const sin = Math.sin(ang) || 1;
     const c: Vec3 = [p[0] + k * (nA[0] + nB[0]), p[1] + k * (nA[1] + nB[1]), p[2] + k * (nA[2] + nB[2])];
     const res = { pts: [] as Vec3[], nrm: [] as Vec3[] };
     for (let j = 0; j <= steps; j++) {
@@ -246,6 +254,26 @@ const pack = (o: { arc: number[]; normals: number[]; bands: number[] }): FilletP
   bands: new Float32Array(o.bands),
 });
 
+/** Normal of a face at its mesh vertex nearest `p` (exact enough for planes, cylinders, tori). */
+function normalNear(m: MeshData, faceName: string, p: Vec3): Vec3 | null {
+  const i = m.faceNames.indexOf(faceName);
+  if (i < 0) return null;
+  const g = m.faceGroups[i];
+  let best = -1, bestD = Infinity;
+  for (let k = g.start; k < g.start + g.count; k++) {
+    const j = m.triangles[k];
+    const d = (m.vertices[j * 3] - p[0]) ** 2 + (m.vertices[j * 3 + 1] - p[1]) ** 2 + (m.vertices[j * 3 + 2] - p[2]) ** 2;
+    if (d < bestD) [best, bestD] = [j, d];
+  }
+  return best < 0 ? null : unit([m.normals[best * 3], m.normals[best * 3 + 1], m.normals[best * 3 + 2]]);
+}
+
+/** Normals of the two faces of an edge at a point: fixed for planes, looked up locally for curved faces. */
+function edgeNormals(m: MeshData, fa: string, fb: string, A: { n: Vec3 }, B: { n: Vec3 }): (p: Vec3) => [Vec3, Vec3] {
+  const planarA = m.facePlanar[m.faceNames.indexOf(fa)], planarB = m.facePlanar[m.faceNames.indexOf(fb)];
+  return (p) => [planarA ? A.n : (normalNear(m, fa, p) ?? A.n), planarB ? B.n : (normalNear(m, fb, p) ?? B.n)];
+}
+
 /** The two faces an edge (or a blend's source edge) "[faceA|faceB]#k" lies between. */
 const edgeFaces = (edgeName: string) => splitPair(edgeName.replace(/#\d+$/, "").replace(/^\[|\]$/g, ""));
 
@@ -268,10 +296,14 @@ export function filletPreview(m: MeshData, edgeNames: string[], radius: number, 
     const pts: Vec3[] = [];
     for (let k = g.start; k < g.start + g.count; k++) pts.push([m.edges[k * 3], m.edges[k * 3 + 1], m.edges[k * 3 + 2]]);
     if (pts.length < 2) continue;
-    const convex = edgeIsConvex(m, A, B, pts[Math.floor(pts.length / 2)]);
+    const normalsAt = edgeNormals(m, fa, fb, A, B);
+    const mid = pts[Math.floor(pts.length / 2)];
+    const planar = m.facePlanar[m.faceNames.indexOf(fa)] && m.facePlanar[m.faceNames.indexOf(fb)];
+    // Between planes the faces' positions decide; on a curved face only the local normals mean anything.
+    const convex = planar ? edgeIsConvex(m, A, B, mid) : materialInside(m, mid, ...normalsAt(mid));
     const segs: [Vec3, Vec3][] = [];
     for (let p = 0; p + 1 < pts.length; p += 2) segs.push([pts[p], pts[p + 1]]);
-    roundSegments(segs, A.n, B.n, convex, radius, steps, out);
+    roundSegments(segs, normalsAt, convex, radius, steps, out);
   }
   return pack(out);
 }
@@ -309,7 +341,7 @@ export function refilletPreview(m: MeshData, blendFace: string, edgeName: string
   // Same test as for a sharp edge, on the rebuilt one (in the air for a convex fillet).
   const convex = edgeIsConvex(m, A, B, at((lo + hi) / 2));
   const out = { arc: [] as number[], normals: [] as number[], bands: [] as number[] };
-  roundSegments([[at(lo), at(hi)]], A.n, B.n, convex, radius, steps, out);
+  roundSegments([[at(lo), at(hi)]], () => [A.n, B.n], convex, radius, steps, out);
   return pack(out);
 }
 
@@ -328,10 +360,11 @@ function solve3(r: [Vec3, Vec3, Vec3], b: [number, number, number]): Vec3 | null
  * from the planes of its two faces) and the bands it takes off them. Null when
  * those faces aren't planar.
  */
-export function covePreview(m: MeshData, coveFaces: string[], edgeName: string, radius: number, steps = 8): FilletPreview | null {
+export function covePreview(m: MeshData, coveFaces: string[], edgeName: string, radius: number, steps = 8, current?: number): FilletPreview | null {
   const [fa, fb] = edgeFaces(edgeName);
   const iA = m.faceNames.indexOf(fa), iB = m.faceNames.indexOf(fb);
-  if (iA < 0 || iB < 0 || !m.facePlanar[iA] || !m.facePlanar[iB] || radius <= 0) return null;
+  if (iA < 0 || iB < 0 || radius <= 0) return null;
+  if (!m.facePlanar[iA] || !m.facePlanar[iB]) return current ? curvedCovePreview(m, coveFaces, fa, fb, radius, current, steps) : null;
   const A = faceAnchor(m, fa), B = faceAnchor(m, fb);
   if (!A || !B) return null;
   const tRaw = cross(A.n, B.n);
@@ -387,6 +420,100 @@ export function covePreview(m: MeshData, coveFaces: string[], edgeName: string, 
     [a0.pts[steps], a1.pts[steps]],
   ] as const) {
     bands.push(...p0, ...p1, ...t1, ...p0, ...t1, ...t0);
+  }
+  return { arc: new Float32Array(arc), normals: new Float32Array(normals), bands: new Float32Array(bands) };
+}
+
+/**
+ * Cove preview on a circular edge (a planar face meeting a cylinder, e.g. the
+ * rim of a hole). The groove is a tube of radius `current` around the edge, so
+ * the edge is found from the groove itself: each groove vertex plus `current`
+ * along its normal (which points at the tube's axis). Those centres are sorted
+ * by angle around their middle in the planar face's plane.
+ */
+function curvedCovePreview(m: MeshData, coveFaces: string[], fa: string, fb: string, radius: number, current: number, steps: number): FilletPreview | null {
+  const A = faceAnchor(m, fa), B = faceAnchor(m, fb);
+  if (!A || !B) return null;
+  const planar = m.facePlanar[m.faceNames.indexOf(fa)] ? A : m.facePlanar[m.faceNames.indexOf(fb)] ? B : null;
+  if (!planar) return null;
+  const centres: Vec3[] = [];
+  for (const name of coveFaces) {
+    const i = m.faceNames.indexOf(name);
+    if (i < 0) continue;
+    const g = m.faceGroups[i];
+    for (let k = g.start; k < g.start + g.count; k++) {
+      const j = m.triangles[k];
+      centres.push([0, 1, 2].map((c) => m.vertices[j * 3 + c] + current * m.normals[j * 3 + c]) as Vec3);
+    }
+  }
+  if (centres.length < 3) return null;
+  const mid = avg(centres);
+  const n = planar.n;
+  // In-plane axes around the middle.
+  const ref: Vec3 = Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+  const ex = unit(cross(n, ref)), ey = cross(n, ex);
+  const BINS = 96;
+  const sum: (Vec3 | null)[] = Array(BINS).fill(null), count = Array(BINS).fill(0);
+  for (const c of centres) {
+    const d = sub(c, mid);
+    const a = Math.atan2(dot(d, ey), dot(d, ex));
+    const b = Math.min(BINS - 1, Math.floor(((a + Math.PI) / (2 * Math.PI)) * BINS));
+    const acc = sum[b] ?? [0, 0, 0];
+    sum[b] = [acc[0] + c[0], acc[1] + c[1], acc[2] + c[2]];
+    count[b]++;
+  }
+  const filled = sum.map((v, b) => (v ? ([v[0] / count[b], v[1] / count[b], v[2] / count[b]] as Vec3) : null));
+  // A full ring, or an arc: start after the largest gap.
+  const empty = filled.map((v) => !v);
+  let start = 0, gap = 0;
+  for (let b = 0; b < BINS; b++) {
+    if (!empty[b]) continue;
+    let e = 0;
+    while (e < BINS && empty[(b + e) % BINS]) e++;
+    if (e > gap) [gap, start] = [e, (b + e) % BINS];
+  }
+  const closed = gap === 0;
+  const pts: Vec3[] = [];
+  for (let k = 0; k < BINS; k++) {
+    const v = filled[(start + k) % BINS];
+    if (v) pts.push(v);
+  }
+  if (pts.length < 2) return null;
+  if (closed) pts.push(pts[0]);
+  const normalsAt = edgeNormals(m, fa, fb, A, B);
+  const along = (nn: Vec3, other: Vec3): Vec3 => {
+    const k = dot(other, nn);
+    return unit([-(other[0] - k * nn[0]), -(other[1] - k * nn[1]), -(other[2] - k * nn[2])]);
+  };
+  const section = (p: Vec3) => {
+    const [nA, nB] = normalsAt(p);
+    const dA = along(nA, nB), dB = along(nB, nA);
+    const ang = Math.acos(Math.max(-1, Math.min(1, dot(dA, dB))));
+    const sin = Math.sin(ang) || 1;
+    const out = { pts: [] as Vec3[], nrm: [] as Vec3[] };
+    for (let j = 0; j <= steps; j++) {
+      const f = j / steps;
+      const wa = Math.sin((1 - f) * ang) / sin, wb = Math.sin(f * ang) / sin;
+      const u: Vec3 = [wa * dA[0] + wb * dB[0], wa * dA[1] + wb * dB[1], wa * dA[2] + wb * dB[2]];
+      out.pts.push([p[0] + radius * u[0], p[1] + radius * u[1], p[2] + radius * u[2]]);
+      out.nrm.push([-u[0], -u[1], -u[2]]);
+    }
+    return out;
+  };
+  const arc: number[] = [], normals: number[] = [], bands: number[] = [];
+  const secs = pts.map(section);
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const a0 = secs[i], a1 = secs[i + 1], p0 = pts[i], p1 = pts[i + 1];
+    for (let j = 0; j < steps; j++) {
+      arc.push(...a0.pts[j], ...a1.pts[j], ...a1.pts[j + 1], ...a0.pts[j], ...a1.pts[j + 1], ...a0.pts[j + 1]);
+      normals.push(...a0.nrm[j], ...a1.nrm[j], ...a1.nrm[j + 1], ...a0.nrm[j], ...a1.nrm[j + 1], ...a0.nrm[j + 1]);
+    }
+    for (const [t0, t1] of [
+      [a0.pts[0], a1.pts[0]],
+      [a0.pts[steps], a1.pts[steps]],
+    ] as const) {
+      bands.push(...p0, ...p1, ...t1, ...p0, ...t1, ...t0);
+    }
   }
   return { arc: new Float32Array(arc), normals: new Float32Array(normals), bands: new Float32Array(bands) };
 }
