@@ -57,7 +57,7 @@ Every feature has:
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | Unique within the document. Referenced by other features. |
-| `type` | string | `sketch`, `extrude`, `revolve`, `fillet`, `chamfer`, `cove`, `pushpull`, `shell`, `mirror`, `pattern`, `transform`, `import` |
+| `type` | string | `sketch`, `extrude`, `revolve`, `sweep`, `loft`, `fillet`, `chamfer`, `cove`, `draft`, `pushpull`, `shell`, `mirror`, `pattern`, `transform`, `import` |
 | `name` | string | Display name. |
 | `suppressed` | boolean | Skipped during replay when true. |
 | `exprs` | object, optional | Maps a numeric field name to an expression, e.g. `{ "distance": "height / 2" }`. The field still holds the last computed number. |
@@ -65,7 +65,7 @@ Every feature has:
 Type-specific fields:
 
 - **sketch**: `plane` (`"XY"`, `"XZ"`, `"YZ"`), optional `face` (persistent name of a planar face; when set, `plane` is ignored), `offset` (number, along the plane normal), `sketch` (see below).
-- **extrude**: `sketchId` (an earlier sketch), `distance` (may be negative), `op`, `regions?`.
+- **extrude**: `sketchId` (an earlier sketch), `distance` (may be negative), `op`, `regions?`, `throughAll?` (with `op` `cut` or `intersect`: go through the whole target body; `distance` then only gives the direction by its sign).
 - **revolve**: `sketchId`, `axis` (`"X"`, `"Y"`, `"Z"`: a world axis through the origin), `axisLine?` (id of a line of the sketch to turn around instead; it takes precedence over `axis`), `angle` (degrees), `op`, `regions?`.
 
   `regions` (optional) lists the sketch regions to use; without it every closed
@@ -74,8 +74,11 @@ Type-specific fields:
   sorted and joined by `+` (with `#k` when several loops share the same curves),
   so it survives geometry changes that keep the boundary. A listed region that no
   longer exists makes the feature fail rather than use a different one.
+- **sweep**: `sketchId` (the profile sketch), `regions?`, `pathId` (another earlier sketch holding the path: its non-construction curves joined end to end into one chain of lines, arcs and open splines, or a single circle, ellipse or closed spline), `op`. Faces are named `<sweepId>:start`, `<sweepId>:end` and `<sweepId>:sweep:<k>` (kernel order).
+- **loft**: `sections` (two or more earlier sketch ids, in order; each contributes its largest closed profile, without holes), `ruled` (true: straight between profiles), `op`. Faces are named `<loftId>:start`, `<loftId>:end` and `<loftId>:loft:<k>`.
 - **fillet / chamfer**: `size` (radius or distance), `edges` (list of persistent edge names; empty means every edge), optional `overrides` (edge name → size for edges that differ from `size`).
 - **cove**: `size` (radius), `edges` (at least one persistent edge name). Removes a cylinder of that radius centred on each edge (a torus segment for circular edges), leaving a concave quarter-round groove; straight and circular edges only. New faces are named `<coveId>:cove:<edge>`.
+- **draft**: `faces` (persistent names of the faces to tilt), `neutral` (persistent name of a planar face; its plane stays fixed and the pull direction points away from it, into the body), `angle` (degrees; positive narrows the part away from the neutral plane). Faces keep their names.
 - **pushpull**: `face` (persistent name of a planar face), `distance` (positive adds material, negative removes it). The face is moved: walls stretch and fillets or holes on it travel along; when the shape around the face doesn't allow that, the face is extruded instead.
 - **shell**: `faces` (persistent names of faces to open), `thickness` (inward).
 - **mirror**: `plane` (`"XY"`, `"XZ"`, `"YZ"`), `offset`. The mirrored copy is joined to the body.
@@ -86,11 +89,11 @@ Type-specific fields:
 ### Bodies
 
 A document can hold several separate solids. A body is identified by the id of
-the feature that created it: an `extrude`, `revolve` or `import` with `op: "new"`.
+the feature that created it: an `extrude`, `revolve`, `sweep`, `loft` or `import` with `op: "new"`.
 `join`, `cut` and `intersect` combine with the body named by the optional
 `target` field, or with the most recently modified body when `target` is absent.
 `mirror` and `pattern` also accept `target`. Features that reference topology
-(`pushpull`, `shell`, `fillet`, `chamfer`, a sketch on a face) act on the body
+(`pushpull`, `shell`, `fillet`, `chamfer`, `cove`, `draft`, a sketch on a face) act on the body
 that owns the referenced face or edge.
 
 `op` is one of `new`, `join`, `cut`, `intersect` and says how the new solid combines with the current body.

@@ -41,6 +41,18 @@ interface Props {
   onEditSketch: (id: string) => void;
   canEditSketch: boolean;
   scope: Scope;
+  /** Draft: pick the neutral face again in the viewport. */
+  onPickNeutral: () => void;
+  pickingNeutral: boolean;
+}
+
+function Check({ label, checked, onChange, title }: { label: string; checked: boolean; onChange: (v: boolean) => void; title?: string }) {
+  return (
+    <label className="field check" title={title}>
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span>{label}</span>
+    </label>
+  );
 }
 
 /** Numeric feature parameter that accepts expressions; stores the source in feature.exprs. */
@@ -92,7 +104,8 @@ const PLANES: [PlaneName, string][] = [
   ["YZ", "YZ (right)"],
 ];
 
-export function PropertiesPanel({ feature: f, sketches, status, onChange, onEditSketch, canEditSketch, scope }: Props) {
+export function PropertiesPanel({ feature: f, sketches, status, onChange, onEditSketch, canEditSketch, scope, onPickNeutral, pickingNeutral }: Props) {
+  const sketchOptions = sketches.map((s) => [s.id, s.name] as [string, string]);
   if (!f) {
     return (
       <aside className="panel props">
@@ -135,7 +148,12 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
           />
           <Select label="Operation" value={f.op} options={OPS} onChange={(op) => onChange({ op })} />
           {f.type === "extrude" ? (
-            <Field label="Distance" feature={f} field="distance" scope={scope} onChange={onChange} />
+            <>
+              <Field label={f.throughAll && (f.op === "cut" || f.op === "intersect") ? "Direction (sign)" : "Distance"} feature={f} field="distance" scope={scope} onChange={onChange} />
+              {(f.op === "cut" || f.op === "intersect") && (
+                <Check label="Through all" checked={!!f.throughAll} onChange={(throughAll) => onChange({ throughAll })} title="Cut through the whole body; the distance only gives the direction" />
+              )}
+            </>
           ) : (
             <>
               <Select
@@ -152,6 +170,63 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
               <Field label="Angle °" feature={f} field="angle" scope={scope} min={0.01} onChange={onChange} />
             </>
           )}
+        </>
+      )}
+
+      {f.type === "sweep" && (
+        <>
+          <Select label="Profile" value={f.sketchId} options={sketchOptions} onChange={(sketchId) => onChange({ sketchId, regions: undefined })} />
+          <Select label="Path" value={f.pathId} options={sketchOptions} onChange={(pathId) => onChange({ pathId })} />
+          <Select label="Operation" value={f.op} options={OPS} onChange={(op) => onChange({ op })} />
+          <p className="muted">The profile's closed regions move along the path: one chain of lines, arcs and splines, or a single closed curve, in another sketch.</p>
+        </>
+      )}
+
+      {f.type === "loft" && (
+        <>
+          <div className="sections">
+            {f.sections.map((id, i) => (
+              <div className="section-row" key={i}>
+                <Select
+                  label={`Profile ${i + 1}`}
+                  value={id}
+                  options={sketchOptions}
+                  onChange={(v) => onChange({ sections: f.sections.map((x, k) => (k === i ? v : x)) })}
+                />
+                <button title="Remove this profile" disabled={f.sections.length <= 2} onClick={() => onChange({ sections: f.sections.filter((_, k) => k !== i) })}>
+                  ×
+                </button>
+              </div>
+            ))}
+            <button
+              className="wide"
+              disabled={!sketches.some((s) => !f.sections.includes(s.id))}
+              onClick={() => onChange({ sections: [...f.sections, sketches.find((s) => !f.sections.includes(s.id))!.id] })}
+            >
+              + Add profile
+            </button>
+          </div>
+          <Check label="Straight sides (ruled)" checked={f.ruled} onChange={(ruled) => onChange({ ruled })} />
+          <Select label="Operation" value={f.op} options={OPS} onChange={(op) => onChange({ op })} />
+          <p className="muted">Each sketch gives its largest closed profile; the solid passes through them in this order.</p>
+        </>
+      )}
+
+      {f.type === "draft" && (
+        <>
+          <Field label="Angle °" feature={f} field="angle" scope={scope} onChange={onChange} />
+          <p>
+            Neutral face: {f.neutral ? <code title={f.neutral}>{shortName(f.neutral)}</code> : <strong>not picked</strong>}
+          </p>
+          <button className="wide" disabled={pickingNeutral} onClick={onPickNeutral}>
+            {pickingNeutral ? "Click the neutral face…" : "Pick the neutral face"}
+          </button>
+          <p>
+            <strong>
+              {f.faces.length} face{f.faces.length === 1 ? "" : "s"} to draft
+            </strong>
+          </p>
+          <p className="muted">Faces tilt about where they meet the neutral face's plane; a positive angle narrows the part away from it. Click faces in the viewport to add or remove them.</p>
         </>
       )}
 

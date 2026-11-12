@@ -1,4 +1,4 @@
-import type { BooleanOp, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, PlaneName, ImportFeature, MirrorFeature, PatternFeature, PushPullFeature, RevolveFeature, ShellFeature, SketchFeature, CoveFeature } from "./types";
+import type { BooleanOp, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, PlaneName, ImportFeature, MirrorFeature, PatternFeature, PushPullFeature, RevolveFeature, ShellFeature, SketchFeature, CoveFeature, SweepFeature, LoftFeature, DraftFeature } from "./types";
 import { emptySketch, type SketchData } from "../sketch/model";
 import { addCircle, addConstraint, addRectangle } from "../sketch/builders";
 
@@ -45,6 +45,33 @@ export function makeRevolve(doc: Document, sketchId: string, op: BooleanOp): Rev
     angle: 360,
     op,
   };
+}
+
+export function makeSweep(doc: Document, sketchId: string, pathId: string, op: BooleanOp): SweepFeature {
+  return { type: "sweep", id: newId("sw"), name: nextName(doc, "Sweep"), suppressed: false, sketchId, pathId, op };
+}
+
+export function makeLoft(doc: Document, sections: string[], op: BooleanOp): LoftFeature {
+  return { type: "loft", id: newId("lo"), name: nextName(doc, "Loft"), suppressed: false, sections, ruled: false, op };
+}
+
+export function makeDraft(doc: Document, faces: string[], neutral = ""): DraftFeature {
+  return { type: "draft", id: newId("dr"), name: nextName(doc, "Draft"), suppressed: false, faces, neutral, angle: 3 };
+}
+
+/** Sketches a feature consumes, with the regions it uses (all when absent). */
+export function sketchUses(f: Feature): { sketchId: string; regions?: string[] }[] {
+  switch (f.type) {
+    case "extrude":
+    case "revolve":
+      return [{ sketchId: f.sketchId, regions: f.regions }];
+    case "sweep":
+      return [{ sketchId: f.sketchId, regions: f.regions }, { sketchId: f.pathId }];
+    case "loft":
+      return f.sections.map((sketchId) => ({ sketchId }));
+    default:
+      return [];
+  }
 }
 
 export function makeEdgeTreatment(doc: Document, type: "fillet" | "chamfer"): EdgeTreatmentFeature {
@@ -96,14 +123,14 @@ export function lastSketch(doc: Document, index = doc.features.length - 1): Sket
 }
 
 export function hasBody(doc: Document) {
-  return doc.features.some((f) => (f.type === "extrude" || f.type === "revolve" || f.type === "import") && !f.suppressed);
+  return doc.features.some((f) => (f.type === "extrude" || f.type === "revolve" || f.type === "sweep" || f.type === "loft" || f.type === "import") && !f.suppressed);
 }
 
 /** Removing a sketch also removes the features that consume it. */
 export function removeFeature(doc: Document, id: string): Document {
   const dependents = new Set([id]);
   for (const f of doc.features) {
-    if ((f.type === "extrude" || f.type === "revolve") && dependents.has(f.sketchId)) dependents.add(f.id);
+    if (sketchUses(f).some((u) => dependents.has(u.sketchId))) dependents.add(f.id);
   }
   return { ...doc, features: doc.features.filter((f) => !dependents.has(f.id)) };
 }

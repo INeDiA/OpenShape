@@ -4,8 +4,11 @@ import {
   demoDocument,
   hasBody,
   lastSketch,
+  makeDraft,
   makeEdgeTreatment,
   makeExtrude,
+  makeLoft,
+  makeSweep,
   makeImport,
   makeMirror,
   makePattern,
@@ -14,8 +17,11 @@ import {
   makeSketch,
   makeSketchOnFace,
   removeFeature,
+  sketchUses,
   updateFeature,
 } from "./model/doc";
+import { findLoops } from "./sketch/profiles";
+import { sketchPath } from "./sketch/path";
 import type { Document, Feature, FeatureStatus, Measurement, MeshData, PlaneName, SketchFeature, SketchPreview } from "./model/types";
 import { SketchEditor } from "./sketch/SketchEditor";
 import { loadSolver, solve, solverReady } from "./sketch/solver";
@@ -153,7 +159,10 @@ export function App() {
   // so its edges/faces can be picked: fillet/chamfer (edges), shell and push/pull (faces).
   const selectedFeature = doc.features.find((f) => f.id === selectedId) ?? null;
   const pickingFeature = !editingSketchId && (selectedFeature?.type === "fillet" || selectedFeature?.type === "chamfer" || selectedFeature?.type === "cove") ? selectedFeature : null;
-  const faceFeature = !editingSketchId && (selectedFeature?.type === "shell" || selectedFeature?.type === "pushpull") ? selectedFeature : null;
+  const faceFeature = !editingSketchId && (selectedFeature?.type === "shell" || selectedFeature?.type === "pushpull" || selectedFeature?.type === "draft") ? selectedFeature : null;
+  // A draft first asks for its neutral face, then for the faces to tilt.
+  const [repickNeutral, setRepickNeutral] = useState(false);
+  const pickNeutral = faceFeature?.type === "draft" && (repickNeutral || !faceFeature.neutral);
   const rollbackId = pickingFeature?.id ?? faceFeature?.id;
 
 
@@ -207,7 +216,7 @@ export function App() {
     const out = new Set<string>();
     if (editingSketchId || pickingFeature || faceFeature) return out;
     for (const sk of sketchPreviews) {
-      const users = doc.features.filter((f) => (f.type === "extrude" || f.type === "revolve") && f.sketchId === sk.id && !f.suppressed) as { regions?: string[] }[];
+      const users = doc.features.filter((f) => !f.suppressed).flatMap((f) => sketchUses(f).filter((u) => u.sketchId === sk.id));
       if (users.some((f) => !f.regions?.length)) continue;
       const used = new Set(users.flatMap((f) => f.regions ?? []));
       for (const r of sk.regions) if (!used.has(r.id)) out.add(regionKey(sk.id, r.id));
@@ -249,6 +258,35 @@ export function App() {
   const selected = doc.features.find((f) => f.id === selectedId) ?? null;
   const sketches = useMemo(() => doc.features.filter((f): f is SketchFeature => f.type === "sketch"), [doc]);
   const baseSketch = selected?.type === "sketch" ? selected : lastSketch(doc);
+  // Sweep: the profile is the selected (or latest) sketch with a closed profile, the
+  // path the latest other sketch that is one chain of curves. Loft: the sketches with
+  // closed profiles nothing uses yet (else the last two).
+  const { sweepPair, loftSections } = useMemo(() => {
+    const live = sketches.filter((s) => !s.suppressed);
+    const closed = live.filter((s) => {
+      try {
+        return findLoops(s.sketch).loops.length > 0;
+      } catch {
+        return false;
+      }
+    });
+    const profile = selected?.type === "sketch" && closed.includes(selected) ? selected : closed[closed.length - 1];
+    const path = [...live].reverse().find((s) => {
+      if (s === profile) return false;
+      try {
+        sketchPath(s.sketch);
+        return !findLoops(s.sketch).loops.length || s.sketch.entities.some((e) => e.kind === "circle");
+      } catch {
+        return false;
+      }
+    });
+    const used = new Set(doc.features.filter((f) => !f.suppressed).flatMap((f) => sketchUses(f).map((u) => u.sketchId)));
+    const free = closed.filter((s) => !used.has(s.id));
+    return {
+      sweepPair: profile && path ? { profile: profile.id, path: path.id } : null,
+      loftSections: (free.length >= 2 ? free : closed.slice(-2)).map((s) => s.id),
+    };
+  }, [sketches, selected, doc]);
   // Kernel status plus expression errors, which take precedence.
   const fullStatus = useMemo(() => {
     const m = new Map(status);
@@ -287,6 +325,19 @@ export function App() {
   const onPickFace = (name: string | null, additive: boolean) => {
     if (faceFeature?.type === "shell") {
       if (!name) return;
+      const faces = faceFeature.faces.includes(name) ? faceFeature.faces.filter((n) => n !== name) : [...faceFeature.faces, name];
+      commit(updateFeature(doc, faceFeature.id, { faces }));
+      return;
+    }
+    if (faceFeature?.type === "draft") {
+      if (!name) return;
+      if (pickNeutral) {
+        if (!faceInfo.get(name)) return flash("The neutral face must be planar");
+        commit(updateFeature(doc, faceFeature.id, { neutral: name, faces: faceFeature.faces.filter((n) => n !== name) }));
+        setRepickNeutral(false);
+        return;
+      }
+      if (name === faceFeature.neutral) return flash("That's the neutral face: it stays fixed");
       const faces = faceFeature.faces.includes(name) ? faceFeature.faces.filter((n) => n !== name) : [...faceFeature.faces, name];
       commit(updateFeature(doc, faceFeature.id, { faces }));
       return;
@@ -472,6 +523,20 @@ export function App() {
           <button disabled={!baseSketch} onClick={() => (setSelectedId(null), manip.startRevolve(baseSketch!.id))} title="Revolve the sketch: pick the axis next">
             ↻ Revolve
           </button>
+          <button
+            disabled={!sweepPair}
+            title={sweepPair ? "Move a sketch profile along the path drawn in another sketch" : "Needs a sketch with a closed profile and another one with a path (a chain of curves)"}
+            onClick={() => add(makeSweep(doc, sweepPair!.profile, sweepPair!.path, hasBody(doc) ? "join" : "new"))}
+          >
+            ➰ Sweep
+          </button>
+          <button
+            disabled={loftSections.length < 2}
+            title={loftSections.length < 2 ? "Needs two or more sketches with closed profiles" : "A solid through the closed profiles of several sketches"}
+            onClick={() => add(makeLoft(doc, loftSections, hasBody(doc) ? "join" : "new"))}
+          >
+            ⏢ Loft
+          </button>
           <button disabled={!hasBody(doc)} onClick={() => add(makeEdgeTreatment(doc, "fillet"))}>◜ Fillet</button>
           <button disabled={!hasBody(doc)} onClick={() => add(makeEdgeTreatment(doc, "chamfer"))}>◸ Chamfer</button>
         </div>
@@ -495,6 +560,17 @@ export function App() {
             }}
           >
             ▢ Shell
+          </button>
+          <button
+            disabled={!hasBody(doc)}
+            title="Tilt faces by an angle (for moulded parts): pick the neutral face, then the faces"
+            onClick={() => {
+              add(makeDraft(doc, liveFaces));
+              setRepickNeutral(false);
+              manip.clear();
+            }}
+          >
+            ⏥ Draft
           </button>
           <button disabled={!hasBody(doc)} onClick={() => add(makeMirror(doc))} title="Mirror the body across a plane">
             ⇋ Mirror
@@ -578,7 +654,17 @@ export function App() {
             const edges = has ? pickingFeature.edges.filter((e) => e !== name) : [...pickingFeature.edges, name];
             commit(updateFeature(doc, pickingFeature.id, { edges }));
           }}
-          selectedFaces={faceFeature?.type === "shell" ? faceFeature.faces : faceFeature?.type === "pushpull" ? [faceFeature.face] : liveFaces}
+          selectedFaces={
+            faceFeature?.type === "shell"
+              ? faceFeature.faces
+              : faceFeature?.type === "pushpull"
+                ? [faceFeature.face]
+                : faceFeature?.type === "draft"
+                  ? pickNeutral
+                    ? []
+                    : [...faceFeature.faces, ...(faceFeature.neutral ? [faceFeature.neutral] : [])]
+                  : liveFaces
+          }
           selectedBody={manip.selection.body}
           onPickFace={onPickFace}
           pickableRegions={pickableRegions}
@@ -628,7 +714,14 @@ export function App() {
         )}
         {faceFeature && (
           <div className="overlay picking-banner">
-            {faceFeature.type === "shell" ? "Click faces to open" : "Click the planar face to move"} · showing the model before <strong>{faceFeature.name}</strong>
+            {faceFeature.type === "shell"
+              ? "Click faces to open"
+              : faceFeature.type === "draft"
+                ? pickNeutral
+                  ? "Click the neutral face (its plane stays fixed)"
+                  : "Click faces to draft"
+                : "Click the planar face to move"}{" "}
+            · showing the model before <strong>{faceFeature.name}</strong>
           </div>
         )}
         {kernelState === "loading" && (
@@ -652,6 +745,8 @@ export function App() {
         onChange={(patch) => selected && commit(updateFeature(doc, selected.id, patch))}
         onEditSketch={startSketchEdit}
         canEditSketch={solverState === "ready" && !editingSketch}
+        onPickNeutral={() => setRepickNeutral(true)}
+        pickingNeutral={pickNeutral}
       />
 
       <footer className="statusbar">

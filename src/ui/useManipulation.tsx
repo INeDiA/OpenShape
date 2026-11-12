@@ -277,12 +277,12 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
       const p = filletPreview(drag.startMesh, f.edges, f.size);
       return p.arc.length ? { positions: p.arc, cut: false, fillet: { normals: p.normals, bands: p.bands } } : null;
     }
-    // Cove: the new groove on each of its edges (where both faces are planar).
+    // Cove: the new groove on each of its edges (rebuilt from the current groove of radius drag.base).
     if (drag.handle === "cove" && f.type === "cove") {
       const arc: number[] = [], normals: number[] = [], bands: number[] = [];
       for (const edge of f.edges) {
         const faces = drag.startMesh.faceNames.filter((n) => n === `${f.id}:cove:${edge}` || n.startsWith(`${f.id}:cove:${edge}#`));
-        const p = covePreview(drag.startMesh, faces, edge, f.size);
+        const p = covePreview(drag.startMesh, faces, edge, f.size, 8, drag.base);
         if (!p) continue;
         arc.push(...p.arc);
         normals.push(...p.normals);
@@ -456,7 +456,8 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
       case "extrude": {
         const e = f as ExtrudeFeature;
         // New extrusions pick their operation from where they go; existing ones keep theirs.
-        if (!d.isNew) return { ...e, distance: v, exprs: undefined };
+        // Dragging sets an explicit depth, so it ends "through all".
+        if (!d.isNew) return { ...e, distance: v, throughAll: undefined, exprs: undefined };
         const { op, target } = autoOperation(d.startMesh, d.regionBase ?? d.anchor, d.dir, v);
         return { ...e, distance: v, op, target, exprs: undefined };
       }
@@ -864,7 +865,7 @@ function ActiveEditor({ feature: f, scope, doc, commit, onDone }: { feature: Fea
       )}
       {f.type === "extrude" && (
         <>
-          {field("distance", "Distance")}
+          {!(f.throughAll && f.op === "cut") && field("distance", "Distance")}
           <select className="ov-select" value={f.op} onChange={(e) => set({ op: e.target.value as BooleanOp })} title="Operation">
             {(["new", "join", "cut"] as const).map((op) => (
               <option key={op} value={op}>
@@ -872,6 +873,11 @@ function ActiveEditor({ feature: f, scope, doc, commit, onDone }: { feature: Fea
               </option>
             ))}
           </select>
+          {f.op === "cut" && (
+            <label className="ov-check" title="Cut through the whole body">
+              <input type="checkbox" checked={!!f.throughAll} onChange={(e) => set({ throughAll: e.target.checked })} /> Through all
+            </label>
+          )}
         </>
       )}
       {f.type === "cove" && field("size", "Radius", 0.01)}

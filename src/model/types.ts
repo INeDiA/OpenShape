@@ -41,6 +41,8 @@ export interface ExtrudeFeature extends FeatureBase {
   /** Region ids of the sketch to use (see sketchRegions); all closed regions when absent. */
   regions?: string[];
   distance: number;
+  /** Cut (or intersect) all the way through the target body, in the direction of `distance`. */
+  throughAll?: boolean;
   op: BooleanOp;
   target?: BodyId;
 }
@@ -57,6 +59,39 @@ export interface RevolveFeature extends FeatureBase {
   angle: number;
   op: BooleanOp;
   target?: BodyId;
+}
+
+/** Moves the profile of one sketch along the path drawn in another. */
+export interface SweepFeature extends FeatureBase {
+  type: "sweep";
+  /** Sketch with the profile. */
+  sketchId: string;
+  /** Region ids of the profile sketch; all closed regions when absent. */
+  regions?: string[];
+  /** Sketch with the path: one chain of curves, or a single closed curve. */
+  pathId: string;
+  op: BooleanOp;
+  target?: BodyId;
+}
+
+/** A solid through the closed profiles of several sketches, in order. */
+export interface LoftFeature extends FeatureBase {
+  type: "loft";
+  /** Sketch ids; each contributes its largest closed region. */
+  sections: string[];
+  /** Straight between profiles instead of smooth. */
+  ruled: boolean;
+  op: BooleanOp;
+  target?: BodyId;
+}
+
+/** Tilts faces by `angle` degrees, pivoting where they meet the plane of the `neutral` face. */
+export interface DraftFeature extends FeatureBase {
+  type: "draft";
+  faces: string[];
+  /** Planar face whose plane stays fixed; the pull direction points away from it. */
+  neutral: string;
+  angle: number;
 }
 
 export interface EdgeTreatmentFeature extends FeatureBase {
@@ -144,6 +179,9 @@ export type Feature =
   | SketchFeature
   | ExtrudeFeature
   | RevolveFeature
+  | SweepFeature
+  | LoftFeature
+  | DraftFeature
   | EdgeTreatmentFeature
   | CoveFeature
   | PushPullFeature

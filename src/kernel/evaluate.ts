@@ -17,6 +17,7 @@ import {
   type Drawing,
   type Face,
   type Shape3D,
+  type Wire,
 } from "replicad";
 import {
   copyNames,
@@ -42,6 +43,10 @@ import { parseSTL } from "../io/stl";
 import { stretchFace } from "./stretch";
 import { treatEdges } from "./edgeTreatment";
 import { blendCorners, mixedRadiusCorners } from "./vertexBlend";
+import { loftThrough, sweepAlong } from "./sweepLoft";
+import { draftFaces } from "./draft";
+import { sketchPath, type SketchPath } from "../sketch/path";
+import { loopArea } from "../sketch/profiles";
 
 export interface EvaluationResult {
   /** All bodies combined (a compound when there are several): for display and export. */
@@ -70,6 +75,18 @@ function loopDrawing(l: Loop): Drawing {
     else pen = pen.cubicBezierCurveTo(s.to, s.c1, s.c2);
   }
   return pen.close();
+}
+
+/** The drawing of a sweep path (open unless it closes on itself). */
+function pathDrawing(p: SketchPath): Drawing {
+  if (p.kind !== "path") return loopDrawing(p);
+  let pen = draw(p.start);
+  for (const s of p.segments) {
+    if (s.kind === "line") pen = pen.lineTo(s.to);
+    else if (s.kind === "arc") pen = pen.threePointsArcTo(s.to, s.mid);
+    else pen = pen.cubicBezierCurveTo(s.to, s.c1, s.c2);
+  }
+  return p.closed ? pen.close() : pen.done();
 }
 
 /**
@@ -384,6 +401,23 @@ export async function evaluate(doc: Document, opts: EvaluateOptions = {}): Promi
   return { body, bodies: list, faceBody, sketches: previews, status, ownsBody: list.length > 1, reused: reuse };
 }
 
+/**
+ * Extrusion length that goes through the whole target body from the sketch
+ * plane in direction `sign` (with a millimetre to spare).
+ */
+function throughDistance(bodies: Bodies, target: BodyId | undefined, frame: Frame, sign: number): number {
+  const body = bodies.target(target);
+  if (!body) throw new Error("No body to cut through");
+  const [lo, hi] = body.shape.shape.boundingBox.bounds;
+  let reach = -Infinity;
+  for (const x of [lo[0], hi[0]]) for (const y of [lo[1], hi[1]]) for (const z of [lo[2], hi[2]]) {
+    const d = (x - frame.origin[0]) * frame.n[0] + (y - frame.origin[1]) * frame.n[1] + (z - frame.origin[2]) * frame.n[2];
+    reach = Math.max(reach, d * sign);
+  }
+  if (reach <= 0) throw new Error("The body is entirely behind the sketch: flip the direction");
+  return sign * (reach + 1);
+}
+
 async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, SketchContext>, previews: SketchPreview[]): Promise<string | undefined> {
   const sketchOf = (id: string) => {
     const s = sketches.get(id);
@@ -409,8 +443,44 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
     case "extrude": {
       const { feature: s, frame } = sketchOf(f.sketchId);
       if (f.distance === 0) throw new Error("Distance cannot be 0");
-      const shape = sketchDrawing(s, f.regions).sketchOnPlane(replicadPlane(frame)).extrude(f.distance) as Shape3D;
-      bodies.add(f.id, { shape, names: nameExtrusion(shape, f.id, s, frame, f.distance) }, f.op, f.target);
+      let distance = f.distance;
+      if (f.throughAll && (f.op === "cut" || f.op === "intersect")) distance = throughDistance(bodies, f.target, frame, Math.sign(f.distance));
+      const shape = sketchDrawing(s, f.regions).sketchOnPlane(replicadPlane(frame)).extrude(distance) as Shape3D;
+      bodies.add(f.id, { shape, names: nameExtrusion(shape, f.id, s, frame, distance) }, f.op, f.target);
+      return;
+    }
+
+    case "sweep": {
+      const { feature: s, frame } = sketchOf(f.sketchId);
+      const { feature: ps, frame: pathFrame } = sketchOf(f.pathId);
+      if (f.pathId === f.sketchId) throw new Error("The path must be in a different sketch from the profile");
+      const sketch = sketchDrawing(s, f.regions).sketchOnPlane(replicadPlane(frame));
+      const spine = (pathDrawing(sketchPath(ps.sketch)).sketchOnPlane(replicadPlane(pathFrame)) as unknown as { wire: Wire }).wire;
+      const tool = sweepAlong((sketch as unknown as { faces(): unknown }).faces(), spine, f.id);
+      bodies.add(f.id, tool, f.op, f.target);
+      return;
+    }
+
+    case "loft": {
+      const wires = f.sections.map((id) => {
+        const { feature: s, frame } = sketchOf(id);
+        const { loops } = findLoops(s.sketch);
+        if (!loops.length) throw new Error(`${s.name} has no closed profile`);
+        // The largest closed profile of each sketch.
+        const loop = loops.reduce((a, b) => (Math.abs(loopArea(b)) > Math.abs(loopArea(a)) ? b : a));
+        return (loopDrawing(loop).sketchOnPlane(replicadPlane(frame)) as unknown as { wire: Wire }).wire;
+      });
+      bodies.add(f.id, loftThrough(wires, f.ruled, f.id), f.op, f.target);
+      return;
+    }
+
+    case "draft": {
+      if (!f.faces.length) throw new Error("Select the faces to draft");
+      if (!f.neutral) throw new Error("Pick the neutral face");
+      const owner = bodies.withFace(f.neutral);
+      const { point, normal } = planarFaceFrame(owner.shape, f.neutral, 0);
+      const faces = f.faces.map((name) => ({ face: faceByName(owner.shape, name), name }));
+      bodies.set(owner.id, draftFaces(owner.shape, faces, point, normal, f.angle, f.id));
       return;
     }
 

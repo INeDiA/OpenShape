@@ -115,11 +115,29 @@ export function validateDocument(raw: unknown): Document {
         str(f.sketchId, `${at}.sketchId`);
         need(sketchIds.has(f.sketchId as string), `${at} references a sketch that doesn't precede it`);
         need(["new", "join", "cut", "intersect"].includes(f.op as string), `${at}.op is invalid`);
-        if (f.type === "extrude") num(f.distance, `${at}.distance`);
-        else {
+        if (f.type === "extrude") {
+          num(f.distance, `${at}.distance`);
+          if (f.throughAll !== undefined) need(typeof f.throughAll === "boolean", `${at}.throughAll must be true or false`);
+        } else {
           need(["X", "Y", "Z"].includes(f.axis as string), `${at}.axis is invalid`);
           num(f.angle, `${at}.angle`);
         }
+        break;
+      case "sweep":
+        str(f.sketchId, `${at}.sketchId`);
+        str(f.pathId, `${at}.pathId`);
+        need(sketchIds.has(f.sketchId as string) && sketchIds.has(f.pathId as string), `${at} references a sketch that doesn't precede it`);
+        need(["new", "join", "cut", "intersect"].includes(f.op as string), `${at}.op is invalid`);
+        break;
+      case "loft":
+        need(Array.isArray(f.sections) && f.sections.length >= 2 && f.sections.every((x) => typeof x === "string" && sketchIds.has(x)), `${at}.sections must list at least two earlier sketches`);
+        need(typeof f.ruled === "boolean", `${at}.ruled must be true or false`);
+        need(["new", "join", "cut", "intersect"].includes(f.op as string), `${at}.op is invalid`);
+        break;
+      case "draft":
+        need(Array.isArray(f.faces) && f.faces.every((x) => typeof x === "string"), `${at}.faces must be a list of names`);
+        str(f.neutral, `${at}.neutral`);
+        num(f.angle, `${at}.angle`);
         break;
       case "fillet":
       case "chamfer":

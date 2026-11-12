@@ -171,6 +171,7 @@ button.wide { width: 100%; margin: 4px 0 10px; }
 .measure-row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
 .measure-row dt { color: var(--muted); }
 .measure-row dd { margin: 0; font-variant-numeric: tabular-nums; cursor: copy; }
+.ov-check { display: flex; align-items: center; gap: 4px; font-size: 12px; white-space: nowrap; }
 .ov-select { font: inherit; font-size: 12px; padding: 3px 4px; border: 1px solid var(--border); border-radius: 5px; background: #fff; }
 /* Kernel at work: a solid accent badge at the top of the view, and the system "busy" cursor everywhere. */
 .busy-indicator { display: flex; align-items: center; gap: 10px; z-index: 6; top: 16px; padding: 9px 16px; font-size: 14px; font-weight: 600; color: #fff; background: var(--accent); border-color: var(--accent); border-radius: 999px; box-shadow: 0 4px 16px rgba(47, 111, 237, 0.35); pointer-events: none; }
@@ -178,3 +179,12 @@ button.wide { width: 100%; margin: 4px 0 10px; }
 .app.computing, .app.computing * { cursor: progress !important; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+
+/* Checkbox rows and loft profile lists in the properties panel. */
+.field.check { justify-content: flex-start; align-items: center; }
+.field.check input { width: auto; margin: 0; }
+.field.check > span:first-child { padding-top: 0; }
+.sections { margin-bottom: 8px; }
+.section-row { display: flex; gap: 6px; align-items: flex-start; }
+.section-row .field { flex: 1; }
+.section-row > button { padding: 3px 8px; }

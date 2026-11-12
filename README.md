@@ -19,7 +19,7 @@ npm test         # test del solver e dei profili (vitest)
 
 ```
 src/
-  model/types.ts     Feature model (sketch, extrude, revolve, fillet, chamfer) + protocollo kernel
+  model/types.ts     Feature model (sketch, extrude, revolve, sweep, loft, fillet, cove, draft…) + protocollo kernel
   model/doc.ts       Creazione/modifica/rimozione feature, documento demo
   kernel/worker.ts   Web Worker: carica OpenCascade WASM (replicad), valuta, esporta
   kernel/evaluate.ts Replay della history sul kernel, mesh per la viewport
@@ -55,7 +55,7 @@ segnalate nella history senza bloccare le altre.
 12. ~~Sketch nella vista 3D, archi tangenti, ellissi, spline, trim e offset~~
 13. ~~Misure~~: distanza, angolo, area, lunghezza, volume e baricentro dei corpi
 14. ~~Raccordi d'angolo con raggi diversi~~: vertex blend con arretramento (setback) dove OCCT lascerebbe una superficie d'angolo a uncino; sfere e tori di OCCT restano
-15. Loft, sweep, draft
+15. ~~Loft, sweep, draft~~, più taglio passante (*through all*) nell'extrude
 16. Disegni tecnici 2D (viste, quote, export PDF/DXF)
 17. App desktop (Tauri) e repo pubblico con CI
 
