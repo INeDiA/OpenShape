@@ -9,8 +9,9 @@
 // extruding the cross-section, and fuse. When those conditions don't hold the
 // caller falls back to a plain extrude-and-fuse.
 
-import { basicFaceExtrusion, drawRectangle, makeVertex, measureDistanceBetween, measureVolume, Plane, Vector, type Face, type Shape3D } from "replicad";
-import { planeFrame, type Vec3 } from "../model/frame";
+import { basicFaceExtrusion, makeVertex, measureDistanceBetween, measureVolume, Vector, type Face, type Shape3D } from "replicad";
+import { fuseShapes, splitByPlane } from "./booleans";
+import type { Vec3 } from "../model/frame";
 import { faceBounds, faceSamples, transferNames, type FaceBounds, type FaceNames, type NamedShape } from "./naming";
 
 const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -47,18 +48,6 @@ function extent(face: Face, n: Vec3): [number, number] {
     max = Math.max(max, d);
   }
   return [min, max];
-}
-
-/**
- * Big box occupying the half-space above (`up`) or below the plane at `level`
- * along `n`, centred on `center` so it covers the body wherever it is.
- */
-function halfSpace(n: Vec3, level: number, size: number, up: boolean, center: Vec3): Shape3D {
-  const fr = planeFrame([n[0] * level, n[1] * level, n[2] * level], n);
-  const off = dot(center, n) - level;
-  const origin: Vec3 = [center[0] - n[0] * off, center[1] - n[1] * off, center[2] - n[2] * off];
-  const plane = new Plane(origin, fr.x, fr.n);
-  return drawRectangle(size, size).sketchOnPlane(plane).extrude(up ? size : -size) as Shape3D;
 }
 
 export interface StretchResult {
@@ -125,11 +114,19 @@ export function stretchFace(body: NamedShape, face: Face, n: Vec3, distance: num
   }
 
   const [lo, hi] = body.shape.boundingBox.bounds as [Vec3, Vec3];
-  const size = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 4 + Math.abs(distance) * 4 + 10;
   const center: Vec3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
 
-  const upper = body.shape.clone().intersect(halfSpace(n, cut, size, true, center));
-  const lower = body.shape.clone().intersect(halfSpace(n, lowest, size, false, center));
+  // One planar split gives both sides (cheaper than two half-space booleans);
+  // pushing inward also trims the lower part down to the new level.
+  const splitAt = (shape: Shape3D, level: number) => {
+    const k = level - dot(center, n);
+    return splitByPlane(shape, [center[0] + n[0] * k, center[1] + n[1] * k, center[2] + n[2] * k], n);
+  };
+  const first = splitAt(body.shape, cut);
+  const upper = first.above;
+  let lower = first.below;
+  if (upper && lower && lowest < cut - 1e-9) lower = splitAt(lower, lowest).below;
+  if (!upper || !lower) return null;
   const move = new Vector([n[0] * distance, n[1] * distance, n[2] * distance]);
   const moved = upper.clone().translate([move.x, move.y, move.z]);
 
@@ -143,18 +140,22 @@ export function stretchFace(body: NamedShape, face: Face, n: Vec3, distance: num
   });
   const lowerNamed: NamedShape = { shape: lower, names: transferNames(lower, [body], () => `${featureId}:cap`) };
 
-  let result: Shape3D = lower.fuse(moved);
+  // The pieces only touch along shared planar faces: OCCT's glue mode handles that much faster.
+  let result: Shape3D = fuseShapes(lower, [moved], { glue: distance < 0 });
   const sources: NamedShape[] = [lowerNamed, { shape: moved, names: movedNames }];
 
   if (distance > 0) {
     // Fill the gap by extruding the cross-section at the cut level.
     const lowerSamples = faceSamples(lower);
     const section = lower.faces.filter((f) => f.geomType === "PLANE" && Math.abs(dot(unit(f.normalAt().toTuple() as Vec3), n)) > 0.999 && Math.abs(dot(lowerSamples.get(f.hashCode)?.p ?? [0, 0, 0], n) - cut) < 1e-4);
+    const fillers: Shape3D[] = [];
     for (const sf of section) {
       const filler = basicFaceExtrusion(sf, move) as Shape3D;
       sources.push({ shape: filler, names: nameFiller(filler, body, n, cut, featureId) });
-      result = result.fuse(filler);
+      fillers.push(filler);
     }
+    // All fillers in one Boolean run (one per filler is much slower on curved bodies).
+    if (fillers.length) result = fuseShapes(result, fillers, { glue: true });
   }
   // Sanity check: the volume must change by the swept cross-section, in the right direction.
   const before = measureVolume(body.shape), after = measureVolume(result);

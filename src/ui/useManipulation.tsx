@@ -7,10 +7,12 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import * as THREE from "three";
 import type { Scope } from "../expr/expr";
-import { makeEdgeTreatment, makePushPull, makeShell, newId, updateFeature } from "../model/doc";
+import { makeCove, makeEdgeTreatment, makeExtrude, makePushPull, makeRevolve, makeShell, newId, updateFeature } from "../model/doc";
 import type { Vec3 } from "../model/frame";
-import type { BodyId, Document, EdgeTreatmentFeature, Feature, MeshData, PushPullFeature, TransformFeature } from "../model/types";
-import { bodyBounds, edgeAnchor, edgeFrame, faceAnchor } from "../viewport/meshGeom";
+import type { BodyId, BooleanOp, CoveFeature, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, MeshData, PushPullFeature, RevolveFeature, SketchFeature, SketchPreview, TransformFeature } from "../model/types";
+import { entityMap, pointOf, sketchLines } from "../sketch/model";
+import { bodyBounds, bodyContaining, covePreview, edgeAnchor, edgeFrame, faceAnchor, filletPreview, refilletPreview } from "../viewport/meshGeom";
+import { extrudeSweep, revolveSweep } from "../viewport/sweep";
 import type { DragPhase, Handle, Overlay } from "../viewport/Viewport";
 import { ExprInput } from "./ExprInput";
 
@@ -18,9 +20,11 @@ export interface Selection {
   faces: string[];
   edges: string[];
   body: BodyId | null;
+  /** Sketch regions, all from one sketch. */
+  regions: { sketch: string; id: string }[];
 }
 
-const EMPTY: Selection = { faces: [], edges: [], body: null };
+const EMPTY: Selection = { faces: [], edges: [], body: null, regions: [] };
 
 interface Params {
   doc: Document;
@@ -32,6 +36,8 @@ interface Params {
   onSketchOnFace: (face: string) => void;
   onAddFeature: (f: Feature) => void;
   bodyName: (id: BodyId) => string;
+  /** Sketch previews from the kernel: frames and regions for region extrusion. */
+  sketches: SketchPreview[];
 }
 
 interface Drag {
@@ -51,6 +57,19 @@ interface Drag {
   startTransform?: TransformFeature;
   /** Edge whose radius a "refillet" drag changes. */
   edge?: string;
+  /** The blend face being re-rounded (hidden while its preview is shown). */
+  blendFace?: string;
+  /** For a new region extrusion: the point on the sketch plane the operation is judged from. */
+  regionBase?: Vec3;
+}
+
+/** A line the revolve axis can be: a sketch line or a world axis. */
+export interface AxisCandidate {
+  id: string;
+  label: string;
+  a: Vec3;
+  b: Vec3;
+  world: boolean;
 }
 
 export interface RigidPreview {
@@ -79,15 +98,21 @@ export function transformMatrix(t: TransformFeature): THREE.Matrix4 {
 /** 1 mm steps, 5° for rotations. */
 const snap = (v: number, step: number) => Math.round(v / step) * step;
 
-export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnFace, onAddFeature, bodyName }: Params) {
+export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnFace, onAddFeature, bodyName, sketches }: Params) {
   const [selection, setSelection] = useState<Selection>(EMPTY);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
 
   const active = doc.features.find((f) => f.id === activeId) ?? null;
+  /** Revolve waiting for its axis: nothing is created until one is picked. */
+  const [axisPick, setAxisPick] = useState<{ sketch: string; regions?: string[] } | null>(null);
+  /** Revolve with its axis chosen, waiting for an angle (dragged or typed); not in the document yet. */
+  const [pendingRevolve, setPendingRevolve] = useState<RevolveFeature | null>(null);
   const clear = useCallback(() => {
     setSelection(EMPTY);
     setActiveId(null);
+    setAxisPick(null);
+    setPendingRevolve(null);
   }, []);
 
   // Selection entries that no longer exist in the mesh are ignored.
@@ -105,11 +130,31 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     faces: selection.faces.map(relocate).filter((n): n is string => !!n),
     edges: selection.edges.filter((n) => edgeSet.has(n)),
     body: selection.body && mesh?.faceBody.includes(selection.body) ? selection.body : null,
+    regions: selection.regions.filter((r) => sketches.some((sk) => sk.id === r.sketch && sk.regions.some((x) => x.id === r.id))),
   };
+  // Where the arrow for extruding the selected regions sits: inside the first region, along the plane normal.
+  const regionSpot = useMemo(() => {
+    const first = live.regions[0];
+    if (!first) return null;
+    const sk = sketches.find((x) => x.id === first.sketch)!;
+    const r = sk.regions.find((x) => x.id === first.id)!;
+    return { sketch: sk, p: onPlane(sk, r.inside), n: sk.frame.n };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live.regions.map((r) => r.sketch + "/" + r.id).join(","), sketches]);
   const planar = (n: string) => !!mesh && mesh.facePlanar[faceIndex.get(n) ?? -1];
   const singlePlanarFace = live.faces.length === 1 && planar(live.faces[0]) ? live.faces[0] : null;
 
   // A selected fillet/chamfer face: its feature and the edge it rounds.
+  // A selected cove groove face: its feature (radius box and arrow, like a fillet face).
+  const coveSel = useMemo(() => {
+    if (live.faces.length !== 1) return null;
+    const m = /^(cv-[^:]+):cove:/.exec(live.faces[0]);
+    if (!m) return null;
+    const feature = doc.features.find((f): f is CoveFeature => f.id === m[1] && f.type === "cove");
+    return feature ? { feature, face: live.faces[0] } : null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live.faces.join(","), doc]);
+
   const blend = useMemo(() => {
     if (live.faces.length !== 1) return null;
     const m = /^((?:fi|ch)-[^:]+):blend:(.+)$/.exec(live.faces[0]);
@@ -145,21 +190,67 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     if (!name) return setSelection(EMPTY);
     setSelection((s) => {
       const faces = additive ? (s.faces.includes(name) ? s.faces.filter((n) => n !== name) : [...s.faces, name]) : s.faces.length === 1 && s.faces[0] === name ? [] : [name];
-      return { faces, edges: additive ? s.edges : [], body: null };
+      return { faces, edges: additive ? s.edges : [], body: null, regions: [] };
+    });
+  };
+  /** Regions accumulate with Shift/Cmd inside one sketch; a region of another sketch starts over. */
+  const pickRegion = (sketch: string, id: string, additive: boolean) => {
+    setActiveId(null);
+    setSelection((s) => {
+      const same = s.regions.length && s.regions[0].sketch === sketch;
+      const has = s.regions.some((r) => r.sketch === sketch && r.id === id);
+      const regions = additive && same ? (has ? s.regions.filter((r) => r.id !== id) : [...s.regions, { sketch, id }]) : has && s.regions.length === 1 ? [] : [{ sketch, id }];
+      return { ...EMPTY, regions };
     });
   };
   /** Edges accumulate: each click adds or removes one (like picking edges for a fillet). */
   const pickEdge = (name: string, additive: boolean) => {
     setActiveId(null);
-    setSelection((s) => ({ faces: additive ? s.faces : [], edges: toggle(s.edges, name), body: null }));
+    setSelection((s) => ({ faces: additive ? s.faces : [], edges: toggle(s.edges, name), body: null, regions: [] }));
   };
   const pickBody = (id: BodyId) => {
     setActiveId(null);
-    setSelection({ faces: [], edges: [], body: id });
+    setSelection({ ...EMPTY, body: id });
   };
 
   // ---- handles -------------------------------------------------------------------
   const activePushPull = active?.type === "pushpull" ? active : null;
+  const activeExtrude = active?.type === "extrude" ? active : null;
+  const activeRevolve = active?.type === "revolve" ? active : null;
+  const activeCove = active?.type === "cove" ? active : null;
+  /** Groove faces of a cove in the shown mesh, and the arrow to change its radius (out of the groove). */
+  const coveFaces = (f: CoveFeature) => (mesh?.faceNames ?? []).filter((n) => n.startsWith(`${f.id}:cove:`));
+  const coveSpot = (f: CoveFeature) => {
+    if (!mesh) return null;
+    const face = coveFaces(f)[0];
+    return face ? faceAnchor(mesh, face) : null;
+  };
+  /** Ring for a revolve: around its axis, level with its (first) region. */
+  const revolveRing = (f: RevolveFeature) => {
+    const sk = sketches.find((x) => x.id === f.sketchId);
+    if (!sk) return null;
+    const axis = revolveAxis(doc, f, sk);
+    if (!axis) return null;
+    const r = sk.regions.find((x) => x.id === f.regions?.[0]) ?? sk.regions[0];
+    const p = r ? onPlane(sk, r.inside) : axis.origin;
+    // Foot of the perpendicular from the region onto the axis.
+    const w = [p[0] - axis.origin[0], p[1] - axis.origin[1], p[2] - axis.origin[2]];
+    const t = w[0] * axis.dir[0] + w[1] * axis.dir[1] + w[2] * axis.dir[2];
+    const center: Vec3 = [axis.origin[0] + axis.dir[0] * t, axis.origin[1] + axis.dir[1] * t, axis.origin[2] + axis.dir[2] * t];
+    // The knob sits on the moving end of the revolution (the profile turned by the angle),
+    // so turning it clockwise or counter-clockwise drags that end the same way.
+    const end = new THREE.Vector3(p[0] - center[0], p[1] - center[1], p[2] - center[2]).applyAxisAngle(new THREE.Vector3(...axis.dir), (f.angle * Math.PI) / 180);
+    return { center, axis: axis.dir, label: axis.label, toward: end.toArray() as Vec3 };
+  };
+  /** Arrow position for an extrude: its region's inside point moved to the end of the extrusion. */
+  const extrudeSpot = (f: ExtrudeFeature, distance = f.distance) => {
+    const sk = sketches.find((x) => x.id === f.sketchId);
+    // Extrudes of a whole sketch (no regions listed) put the arrow on its first region.
+    const r = sk?.regions.find((x) => x.id === f.regions?.[0]) ?? sk?.regions[0];
+    if (!sk || !r) return null;
+    const p = onPlane(sk, r.inside), n = sk.frame.n;
+    return { p: [p[0] + n[0] * distance, p[1] + n[1] * distance, p[2] + n[2] * distance] as Vec3, base: p, n };
+  };
   const activeTransform = active?.type === "transform" ? active : null;
 
   // Moving/rotating a body is previewed in the viewport (no kernel round trip).
@@ -176,13 +267,76 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     return { mesh: drag.startMesh, face: drag.isNew ? f.face : `${f.id}:end`, distance: drag.value };
   }, [drag]);
 
+  // Translucent swept volume while dragging an extrude or revolve of sketch regions (no kernel wait).
+  const sweep = useMemo<{ positions: Float32Array; cut: boolean; fillet?: { normals: Float32Array; bands: Float32Array } } | null>(() => {
+    if (!drag) return null;
+    const f = drag.feature;
+    // New fillet: the rounded surface on the chosen edges (and the face bands it eats into),
+    // from the mesh shown when the drag started.
+    if (drag.handle === "fillet" && f.type === "fillet") {
+      const p = filletPreview(drag.startMesh, f.edges, f.size);
+      return p.arc.length ? { positions: p.arc, cut: false, fillet: { normals: p.normals, bands: p.bands } } : null;
+    }
+    // Cove: the new groove on each of its edges (where both faces are planar).
+    if (drag.handle === "cove" && f.type === "cove") {
+      const arc: number[] = [], normals: number[] = [], bands: number[] = [];
+      for (const edge of f.edges) {
+        const faces = drag.startMesh.faceNames.filter((n) => n === `${f.id}:cove:${edge}` || n.startsWith(`${f.id}:cove:${edge}#`));
+        const p = covePreview(drag.startMesh, faces, edge, f.size);
+        if (!p) continue;
+        arc.push(...p.arc);
+        normals.push(...p.normals);
+        bands.push(...p.bands);
+      }
+      return arc.length ? { positions: new Float32Array(arc), cut: true, fillet: { normals: new Float32Array(normals), bands: new Float32Array(bands) } } : null;
+    }
+    // Existing fillet face: the same preview, on the sharp edge rebuilt under it.
+    if (drag.handle === "refillet" && drag.blendFace && drag.edge) {
+      const p = refilletPreview(drag.startMesh, drag.blendFace, drag.edge, Math.max(0.1, drag.base + drag.value));
+      return p?.arc.length ? { positions: p.arc, cut: false, fillet: { normals: p.normals, bands: p.bands } } : null;
+    }
+    if (drag.handle !== "extrude" && drag.handle !== "revolve") return null;
+    if (f.type === "extrude" && f.distance !== 0) {
+      const sk = sketches.find((x) => x.id === f.sketchId);
+      return sk ? { positions: extrudeSweep(sk, f.regions, f.distance), cut: f.op === "cut" } : null;
+    }
+    if (f.type === "revolve" && f.angle !== 0) {
+      const sk = sketches.find((x) => x.id === f.sketchId);
+      const axis = sk && revolveAxis(doc, f, sk);
+      return sk && axis ? { positions: revolveSweep(sk, f.regions, axis.origin, axis.dir, f.angle), cut: f.op === "cut" } : null;
+    }
+    return null;
+  }, [drag, sketches, doc]);
+
+  // The blend being re-rounded is hidden while its new shape is previewed.
+  const hiddenFaces = useMemo(() => {
+    if (!drag || !sweep) return [];
+    if (drag.handle === "refillet" && drag.blendFace) return [drag.blendFace];
+    if (drag.handle === "cove" && drag.feature.type === "cove") return drag.startMesh.faceNames.filter((n) => n.startsWith(`${drag.feature.id}:cove:`));
+    return [];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drag?.handle, drag?.blendFace, !!sweep]);
+
   const handles = useMemo<Handle[]>(() => {
-    if (!enabled || !mesh) return [];
+    if (!enabled || !mesh || axisPick) return [];
     if (drag) return dragHandles(drag, rigid);
     if (activePushPull) {
       const a = faceAnchor(mesh, `${activePushPull.id}:end`);
       return a ? [{ id: "pushpull", kind: "arrow", origin: a.p, dir: a.n, color: 0x4f8cff }] : [];
     }
+    if (activeExtrude) {
+      const a = extrudeSpot(activeExtrude);
+      return a ? [{ id: "extrude", kind: "arrow", origin: a.p, dir: a.n, color: 0x4f8cff }] : [];
+    }
+    if (activeCove || coveSel) {
+      const a = activeCove ? coveSpot(activeCove) : faceAnchor(mesh, coveSel!.face);
+      return a ? [{ id: "cove", kind: "arrow", origin: a.p, dir: a.n, color: 0xff6b93 }] : [];
+    }
+    if (pendingRevolve || activeRevolve) {
+      const ring = revolveRing((pendingRevolve ?? activeRevolve)!);
+      return ring ? [{ id: "revolve", kind: "ring", center: ring.center, axis: ring.axis, color: 0x8e6cf0, arc: 120, toward: ring.toward }] : [];
+    }
+    if (regionSpot) return [{ id: "extrude", kind: "arrow", origin: regionSpot.p, dir: regionSpot.n, color: 0x4f8cff }];
     if (singlePlanarFace) {
       const a = faceAnchor(mesh, singlePlanarFace);
       return a ? [{ id: "pushpull", kind: "arrow", origin: a.p, dir: a.n, color: 0x4f8cff }] : [];
@@ -204,7 +358,7 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     }
     return [];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, mesh, drag?.handle, rigid, activePushPull?.id, singlePlanarFace, blend?.face, live.edges.join(","), live.body]);
+  }, [enabled, mesh, drag?.handle, drag?.value, rigid, activePushPull?.id, activeExtrude, activeRevolve, activeCove, coveSel?.face, pendingRevolve, regionSpot, singlePlanarFace, blend?.face, live.edges.join(","), live.body]);
 
   const onHandleDrag = (id: string, raw: number, phase: DragPhase) => {
     if (!mesh) return;
@@ -213,7 +367,7 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     if (phase === "move") {
       // Fillets grow slower than the pointer (half the travel, 0.5 mm steps) for finer control.
       // Fillet handles slide on a face: the travel is the radius (0.5 mm steps).
-      const value = id === "rotate" ? snap(raw, 5) : id === "fillet" || id === "refillet" ? snap(raw, 0.5) : snap(raw, 1);
+      const value = id === "rotate" || id === "revolve" ? snap(raw, 5) : id === "fillet" || id === "refillet" || id === "cove" ? snap(raw, 0.5) : snap(raw, 1);
       if (value === drag.value) return;
       setDrag({ ...drag, value, feature: applyValue(drag, value) });
       return;
@@ -224,9 +378,11 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     if (d.value === 0 && d.isNew) return; // a click on the handle, nothing to do
     const f = applyValue(d, d.value);
     commit(d.isNew ? { ...doc, features: [...doc.features, f] } : updateFeature(doc, f.id, f));
+    if (f.type === "revolve") setPendingRevolve(null);
     if (d.handle === "refillet") return; // keep the blend face selected; its box edits this edge
     setActiveId(f.id);
-    if (f.type === "pushpull") setSelection({ faces: [`${f.id}:end`], edges: [], body: null });
+    if (f.type === "pushpull") setSelection({ ...EMPTY, faces: [`${f.id}:end`] });
+    else if (f.type === "extrude") setSelection(EMPTY);
     else if (f.type === "fillet" || f.type === "chamfer") setSelection(EMPTY);
   };
 
@@ -240,11 +396,33 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
       const a = faceAnchor(mesh, singlePlanarFace!)!;
       return { handle: id, feature: makePushPull(doc, singlePlanarFace!, 0), isNew: true, base: 0, value: 0, anchor: a.p, dir: a.n, startMesh: mesh };
     }
+    if (id === "cove" && (activeCove || coveSel)) {
+      const f = activeCove ?? coveSel!.feature;
+      const a = (activeCove ? coveSpot(activeCove) : faceAnchor(mesh, coveSel!.face))!;
+      return { handle: id, feature: f, isNew: false, base: f.size, value: 0, anchor: a.p, dir: a.n, startMesh: mesh };
+    }
+    if (id === "revolve" && pendingRevolve) {
+      const ring = revolveRing(pendingRevolve)!;
+      return { handle: id, feature: pendingRevolve, isNew: true, base: 0, value: 0, anchor: ring.center, dir: ring.axis, startMesh: mesh };
+    }
+    if (id === "revolve" && activeRevolve) {
+      const ring = revolveRing(activeRevolve)!;
+      return { handle: id, feature: activeRevolve, isNew: false, base: activeRevolve.angle, value: 0, anchor: ring.center, dir: ring.axis, startMesh: mesh };
+    }
+    if (id === "extrude") {
+      if (activeExtrude) {
+        const a = extrudeSpot(activeExtrude)!;
+        return { handle: id, feature: activeExtrude, isNew: false, base: activeExtrude.distance, value: 0, anchor: a.p, dir: a.n, startMesh: mesh };
+      }
+      const spot = regionSpot!;
+      const f: ExtrudeFeature = { ...makeExtrude(doc, spot.sketch.id, "new"), regions: live.regions.map((r) => r.id), distance: 0 };
+      return { handle: id, feature: f, isNew: true, base: 0, value: 0, anchor: spot.p, dir: spot.n, startMesh: mesh, regionBase: spot.p };
+    }
     if (id === "refillet" && blend) {
       const a = faceAnchor(mesh, blend.face)!;
       const f = blend.feature;
       const dir = blendDirection(mesh, blend.edge, a.n) ?? [-a.n[0], -a.n[1], -a.n[2]];
-      return { handle: id, feature: f, isNew: false, base: overrideFor(f, blend.edge) ?? f.size, value: 0, anchor: a.p, dir, startMesh: mesh, edge: blend.edge };
+      return { handle: id, feature: f, isNew: false, base: overrideFor(f, blend.edge) ?? f.size, value: 0, anchor: a.p, dir, startMesh: mesh, edge: blend.edge, blendFace: blend.face };
     }
     if (id === "fillet") {
       const a = edgeAnchor(mesh, live.edges[0])!;
@@ -269,8 +447,23 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     switch (d.handle) {
       case "pushpull":
         return { ...(f as PushPullFeature), distance: v, exprs: undefined };
+      case "revolve": {
+        // Up to a full turn either way; never 0 (that would be no solid).
+        let a = Math.max(-360, Math.min(360, v));
+        if (Math.abs(a) < 1) a = a < 0 ? -1 : 1;
+        return { ...(f as RevolveFeature), angle: a, exprs: undefined };
+      }
+      case "extrude": {
+        const e = f as ExtrudeFeature;
+        // New extrusions pick their operation from where they go; existing ones keep theirs.
+        if (!d.isNew) return { ...e, distance: v, exprs: undefined };
+        const { op, target } = autoOperation(d.startMesh, d.regionBase ?? d.anchor, d.dir, v);
+        return { ...e, distance: v, op, target, exprs: undefined };
+      }
       case "fillet":
         return { ...(f as EdgeTreatmentFeature), size: Math.max(0.1, v), exprs: undefined };
+      case "cove":
+        return { ...(f as CoveFeature), size: Math.max(0.1, v), exprs: undefined };
       case "refillet": {
         const t = f as EdgeTreatmentFeature;
         const edge = blendEdge(d);
@@ -288,17 +481,109 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
   }
 
   // While dragging, the kernel previews the document with the feature applied.
-  const previewDoc = useMemo<Document | null>(() => {
-    if (!drag || (drag.value === 0 && drag.isNew)) return null;
-    const f = drag.feature;
-    if (f.type === "transform") return null; // previewed in the viewport
-    if ((f.type === "pushpull" && f.distance === 0) || ((f.type === "fillet" || f.type === "chamfer") && f.size <= 0)) return null;
-    return drag.isNew ? { ...doc, features: [...doc.features, f] } : updateFeature(doc, f.id, f);
-  }, [drag, doc]);
+  // The solid itself is only rebuilt when the handle is released: while dragging,
+  // previews are drawn in the viewport (ghost prism, swept volume, rigid move).
+  const dragging = !!drag;
+
+  // ---- revolve axis picking --------------------------------------------------------
+  /** Starts a revolve of a sketch (or some of its regions): the axis is picked next. */
+  const startRevolve = useCallback((sketch: string, regions?: string[]) => {
+    setSelection(EMPTY);
+    setActiveId(null);
+    setAxisPick({ sketch, regions });
+  }, []);
+
+  /** Lines that can be the axis: the sketch's lines, then the world axes through the origin. */
+  const axisCandidates = useMemo<AxisCandidate[]>(() => {
+    if (!axisPick) return [];
+    const sk = sketches.find((x) => x.id === axisPick.sketch);
+    const sketch = doc.features.find((f): f is SketchFeature => f.id === axisPick.sketch && f.type === "sketch");
+    const out: AxisCandidate[] = [];
+    if (sk && sketch) {
+      const m = entityMap(sketch.sketch);
+      for (const l of sketchLines(sketch.sketch)) {
+        const line = m.get(l.id);
+        if (!line || line.kind !== "line") continue;
+        const a = pointOf(m, line.p1), b = pointOf(m, line.p2);
+        out.push({ id: l.id, label: l.label, a: onPlane(sk, [a.x, a.y]), b: onPlane(sk, [b.x, b.y]), world: false });
+      }
+    }
+    let size = 100;
+    if (mesh?.vertices.length) {
+      for (let i = 0; i < mesh.vertices.length; i++) size = Math.max(size, Math.abs(mesh.vertices[i]) * 1.5);
+    }
+    for (const [id, d] of [["X", [1, 0, 0]], ["Y", [0, 1, 0]], ["Z", [0, 0, 1]]] as const) {
+      out.push({ id, label: `world ${id}`, a: [-d[0] * size, -d[1] * size, -d[2] * size], b: [d[0] * size, d[1] * size, d[2] * size], world: true });
+    }
+    return out;
+  }, [axisPick, sketches, doc, mesh]);
+
+  const pickAxis = (id: string) => {
+    if (!axisPick) return;
+    const sk = sketches.find((x) => x.id === axisPick.sketch);
+    const r = sk?.regions.find((x) => x.id === axisPick.regions?.[0]) ?? sk?.regions[0];
+    const { op, target } = sk && r ? autoOperation(mesh, onPlane(sk, r.inside), sk.frame.n, 1) : { op: "new" as BooleanOp, target: undefined };
+    const world = id === "X" || id === "Y" || id === "Z";
+    // Nothing is built yet: the ring appears and the angle comes from the user.
+    const f: RevolveFeature = { ...makeRevolve(doc, axisPick.sketch, op), regions: axisPick.regions, target, angle: 0, ...(world ? { axis: id } : { axisLine: id }) };
+    setAxisPick(null);
+    setPendingRevolve(f);
+  };
+
+  /** Creates the pending revolve with a typed angle. */
+  const finishRevolve = (angle: number) => {
+    if (!pendingRevolve || !angle) return;
+    const f = { ...pendingRevolve, angle: Math.max(-360, Math.min(360, angle)) };
+    commit({ ...doc, features: [...doc.features, f] });
+    setPendingRevolve(null);
+    setActiveId(f.id);
+  };
 
   // ---- floating overlay ------------------------------------------------------------
   const overlay = useMemo<Overlay | null>(() => {
-    if (!enabled || !mesh) return null;
+    if (!enabled) return null;
+    if (pendingRevolve && !drag) {
+      const ring = revolveRing(pendingRevolve);
+      if (!ring) return null;
+      return {
+        anchor: ring.center,
+        content: (
+          <div className="ov-menu">
+            <strong className="ov-title">↻ Revolve · axis {ring.label}</strong>
+            <span className="ov-hint">drag the ring, or type the angle</span>
+            <label className="ov-field">
+              <span>Angle °</span>
+              <ExprInput value={0} scope={scope} onCommit={({ value }) => finishRevolve(value)} />
+            </label>
+            <button onClick={() => setPendingRevolve(null)} title="Cancel (Esc)">
+              Cancel
+            </button>
+          </div>
+        ),
+      };
+    }
+    if (axisPick) {
+      const sk = sketches.find((x) => x.id === axisPick.sketch);
+      const r = sk?.regions.find((x) => x.id === axisPick.regions?.[0]) ?? sk?.regions[0];
+      const anchor = sk ? (r ? onPlane(sk, r.inside) : sk.frame.origin) : null;
+      if (!anchor) return null;
+      const lines = axisCandidates.filter((c) => !c.world).length;
+      return {
+        anchor,
+        content: (
+          <div className="ov-menu">
+            <strong className="ov-title">↻ Revolve</strong>
+            <span className="ov-hint">
+              pick the axis: {lines ? "a line of the sketch or " : ""}a world axis{lines ? "" : " · add a construction line to the sketch for your own axis"}
+            </span>
+            <button onClick={() => setAxisPick(null)} title="Cancel (Esc)">
+              Cancel
+            </button>
+          </div>
+        ),
+      };
+    }
+    if (!mesh) return null;
     if (drag) {
       const h = dragHandles(drag, rigid)[0];
       const anchor = h ? (h.kind === "arrow" ? h.origin : h.center) : drag.anchor;
@@ -306,14 +591,53 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     }
 
     if (active) {
-      const anchor = activeAnchor(active, mesh);
+      const anchor = active.type === "extrude" ? (extrudeSpot(active)?.p ?? null) : active.type === "revolve" ? (revolveRing(active)?.center ?? null) : active.type === "cove" ? (coveSpot(active)?.p ?? null) : activeAnchor(active, mesh);
       if (!anchor) return null;
       return { anchor, content: <ActiveEditor feature={active} scope={scope} doc={doc} commit={commit} onDone={clear} /> };
     }
 
     const buttons: ReactNode[] = [];
     let anchor: Vec3 | null = null;
-    if (blend) {
+    if (regionSpot) {
+      anchor = regionSpot.p;
+      const sk = regionSpot.sketch;
+      const name = doc.features.find((f) => f.id === sk.id)?.name ?? "sketch";
+      const regions = live.regions.map((r) => r.id);
+      const add = (f: Feature) => {
+        commit({ ...doc, features: [...doc.features, f] });
+        setActiveId(f.id);
+        setSelection(EMPTY);
+      };
+      buttons.push(<strong key="t" className="ov-title">{regions.length > 1 ? `${regions.length} regions` : "Region"} · {name}</strong>);
+      buttons.push(
+        <button
+          key="ex"
+          onClick={() => {
+            const { op, target } = autoOperation(mesh, regionSpot.p, regionSpot.n, 10);
+            add({ ...makeExtrude(doc, sk.id, op), regions, distance: 10, target });
+          }}
+        >
+          ⬆ Extrude
+        </button>,
+      );
+      buttons.push(
+        <button key="rv" onClick={() => startRevolve(sk.id, regions)} title="Revolve around an axis you pick next">
+          ↻ Revolve
+        </button>,
+      );
+      buttons.push(<span key="h" className="ov-hint">drag the arrow · into the solid cuts</span>);
+    } else if (coveSel) {
+      const f = coveSel.feature;
+      anchor = faceAnchor(mesh, coveSel.face)?.p ?? null;
+      buttons.push(<strong key="t" className="ov-title">{f.name}</strong>);
+      buttons.push(
+        <label key="v" className="ov-field">
+          <span>R</span>
+          <ExprInput value={f.size} expr={f.exprs?.size} scope={scope} min={0.01} onCommit={({ value, expr }) => commit(updateFeature(doc, f.id, { size: value, exprs: expr ? { ...f.exprs, size: expr } : undefined } as Partial<Feature>))} />
+        </label>,
+      );
+      buttons.push(<span key="h" className="ov-hint">{f.edges.length > 1 ? `all ${f.edges.length} edges · ` : ""}drag the arrow</span>);
+    } else if (blend) {
       anchor = faceAnchor(mesh, blend.face)?.p ?? null;
       const f = blend.feature;
       const current = overrideFor(f, blend.edge);
@@ -362,6 +686,20 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
           </button>,
         );
       }
+      buttons.push(
+        <button
+          key="cove"
+          title="Concave quarter-round groove along the edges"
+          onClick={() => {
+            const f = makeCove(doc, live.edges.filter((e) => edgeFrame(mesh, e)), 2);
+            commit({ ...doc, features: [...doc.features, f] });
+            setActiveId(f.id);
+            setSelection(EMPTY);
+          }}
+        >
+          ◟ Cove
+        </button>,
+      );
       buttons.push(<span key="n" className="ov-hint">{live.edges.length} edge{live.edges.length > 1 ? "s" : ""} · drag the arrow</span>);
     } else if (live.body) {
       anchor = bodyBounds(mesh, live.body)?.center ?? null;
@@ -369,9 +707,15 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     }
     return anchor && buttons.length ? { anchor, content: <div className="ov-menu">{buttons}</div> } : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, mesh, drag, rigid, active, blend, live.faces.join(","), live.edges.join(","), live.body, singlePlanarFace, doc, scope]);
+  }, [enabled, mesh, drag, rigid, active, blend, coveSel, regionSpot, axisPick, axisCandidates, pendingRevolve, live.faces.join(","), live.edges.join(","), live.body, singlePlanarFace, doc, scope, sketches]);
 
-  return { selection: live, pickFace, pickEdge, pickBody, clear, handles, onHandleDrag, overlay, previewDoc, rigid, ghost, singlePlanarFace, activeId };
+  /** Shows the handles and value box of an existing feature (picked in the history). */
+  const activate = useCallback((id: string | null) => {
+    setSelection(EMPTY);
+    setActiveId(id);
+  }, []);
+
+  return { selection: live, pickFace, pickEdge, pickBody, pickRegion, clear, activate, startRevolve, axisCandidates, pickAxis, pickingAxis: !!axisPick, handles, onHandleDrag, overlay, dragging, rigid, ghost, sweep, hiddenFaces, singlePlanarFace, activeId };
 }
 
 const blendEdge = (d: Drag) => d.edge ?? "";
@@ -404,16 +748,20 @@ function blendDirection(_mesh: MeshData, _edge: string, blendNormal?: Vec3): Vec
 const toggle = (list: string[], x: string) => (list.includes(x) ? list.filter((n) => n !== x) : [...list, x]);
 
 function dragHandles(d: Drag, rigid: RigidPreview | null): Handle[] {
-  if (d.handle === "pushpull" || d.handle === "fillet" || d.handle === "refillet") {
+  if (d.handle === "extrude" ||
+    d.handle === "cove" ||
+    d.handle === "pushpull" || d.handle === "fillet" || d.handle === "refillet") {
     // The grabbed arrow follows the value along its direction.
     const k = d.value;
     const origin: Vec3 = [d.anchor[0] + d.dir[0] * k, d.anchor[1] + d.dir[1] * k, d.anchor[2] + d.dir[2] * k];
     return [{ id: d.handle, kind: "arrow", origin, dir: d.dir, color: 0xffc53d }];
   }
+  // A revolve keeps just its ring, around the axis.
+  if (d.handle === "revolve") return [{ id: "revolve", kind: "ring", center: d.anchor, axis: d.dir, color: 0xffc53d, arc: 120, turn: d.value }];
   // Body gizmo moves with the body.
   const c = new THREE.Vector3(...d.anchor);
   if (rigid) c.applyMatrix4(new THREE.Matrix4().fromArray(rigid.matrix));
-  return bodyGizmo([c.x, c.y, c.z]).map((h) => (h.id === d.handle ? { ...h, color: 0xffc53d } : h));
+  return bodyGizmo([c.x, c.y, c.z]).map((h) => (h.id === d.handle ? { ...h, color: 0xffc53d, ...(h.kind === "ring" ? { turn: d.value } : {}) } : h));
 }
 
 function bodyGizmo(c: Vec3): Handle[] {
@@ -430,8 +778,15 @@ function formatDrag(d: Drag): string {
   switch (d.handle) {
     case "pushpull":
       return `${v > 0 ? "+" : ""}${v} mm`;
+    case "revolve":
+      return `↻ ${(d.feature as RevolveFeature).angle}°`;
+    case "extrude": {
+      const op = (d.feature as ExtrudeFeature).op;
+      return `${OP_LABEL[op]} ${Math.abs(v)} mm`;
+    }
     case "fillet":
     case "refillet":
+    case "cove":
       return `R ${Math.max(0.1, v)} mm`;
     case "rotate":
       return `${(((v + 540) % 360) - 180).toFixed(0)}°`;
@@ -477,6 +832,49 @@ function ActiveEditor({ feature: f, scope, doc, commit, onDone }: { feature: Fea
     <div className="ov-menu">
       <strong className="ov-title">{f.name}</strong>
       {f.type === "pushpull" && field("distance", "Distance")}
+      {f.type === "revolve" && (
+        <>
+          {field("angle", "Angle °")}
+          <select
+            className="ov-select"
+            value={f.axisLine ?? f.axis}
+            title="Axis"
+            onChange={(e) => {
+              const v = e.target.value;
+              set(v === "X" || v === "Y" || v === "Z" ? ({ axis: v, axisLine: undefined } as Partial<Feature>) : ({ axisLine: v } as Partial<Feature>));
+            }}
+          >
+            {sketchLines((doc.features.find((x) => x.id === f.sketchId && x.type === "sketch") as SketchFeature | undefined)?.sketch ?? { entities: [], constraints: [] }).map((l) => (
+              <option key={l.id} value={l.id}>
+                Axis: {l.label}
+              </option>
+            ))}
+            <option value="X">Axis: world X</option>
+            <option value="Y">Axis: world Y</option>
+            <option value="Z">Axis: world Z</option>
+          </select>
+          <select className="ov-select" value={f.op} onChange={(e) => set({ op: e.target.value as BooleanOp })} title="Operation">
+            {(["new", "join", "cut"] as const).map((op) => (
+              <option key={op} value={op}>
+                {OP_LABEL[op]}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
+      {f.type === "extrude" && (
+        <>
+          {field("distance", "Distance")}
+          <select className="ov-select" value={f.op} onChange={(e) => set({ op: e.target.value as BooleanOp })} title="Operation">
+            {(["new", "join", "cut"] as const).map((op) => (
+              <option key={op} value={op}>
+                {OP_LABEL[op]}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
+      {f.type === "cove" && field("size", "Radius", 0.01)}
       {(f.type === "fillet" || f.type === "chamfer") && (
         <>
           {field("size", f.type === "fillet" ? "Radius" : "Distance", 0.01)}
@@ -498,4 +896,47 @@ function ActiveEditor({ feature: f, scope, doc, commit, onDone }: { feature: Fea
       </button>
     </div>
   );
+}
+
+const OP_LABEL: Record<BooleanOp, string> = { new: "New body", join: "Join", cut: "Cut", intersect: "Intersect" };
+
+/** World position of a point given in a sketch's plane coordinates. */
+function onPlane(sk: SketchPreview, [u, v]: [number, number]): Vec3 {
+  const { origin: o, x, y } = sk.frame;
+  return [o[0] + x[0] * u + y[0] * v, o[1] + x[1] * u + y[1] * v, o[2] + x[2] * u + y[2] * v];
+}
+
+/**
+ * Operation for extruding a region from point `p` on its plane by `distance`
+ * along `n`: into a body cuts it, out of a body it touches joins it, and
+ * anywhere else makes a new body.
+ */
+export function autoOperation(mesh: MeshData | null, p: Vec3, n: Vec3, distance: number): { op: BooleanOp; target?: BodyId } {
+  if (!mesh || distance === 0) return { op: "new" };
+  const k = Math.sign(distance) * Math.min(0.05, Math.abs(distance) / 2);
+  const ahead: Vec3 = [p[0] + n[0] * k, p[1] + n[1] * k, p[2] + n[2] * k];
+  const behind: Vec3 = [p[0] - n[0] * k, p[1] - n[1] * k, p[2] - n[2] * k];
+  const into = bodyContaining(mesh, ahead);
+  if (into) return { op: "cut", target: into };
+  const touching = bodyContaining(mesh, behind);
+  if (touching) return { op: "join", target: touching };
+  return { op: "new" };
+}
+
+/** World axis of a revolve: its sketch line (in the sketch's plane) or a world axis through the origin. */
+export function revolveAxis(doc: Document, f: RevolveFeature, sk: SketchPreview): { origin: Vec3; dir: Vec3; label: string } | null {
+  if (f.axisLine) {
+    const sketch = doc.features.find((x): x is SketchFeature => x.id === f.sketchId && x.type === "sketch");
+    const m = sketch ? entityMap(sketch.sketch) : null;
+    const line = m?.get(f.axisLine);
+    if (!m || !line || line.kind !== "line") return null;
+    const a = pointOf(m, line.p1), b = pointOf(m, line.p2);
+    const o = onPlane(sk, [a.x, a.y]), e = onPlane(sk, [b.x, b.y]);
+    const d: Vec3 = [e[0] - o[0], e[1] - o[1], e[2] - o[2]];
+    const l = Math.hypot(...d) || 1;
+    const label = sketchLines(sketch!.sketch).find((x) => x.id === f.axisLine)?.label ?? "line";
+    return { origin: o, dir: [d[0] / l, d[1] / l, d[2] / l], label };
+  }
+  const dir: Vec3 = f.axis === "X" ? [1, 0, 0] : f.axis === "Y" ? [0, 1, 0] : [0, 0, 1];
+  return { origin: [0, 0, 0], dir, label: `world ${f.axis}` };
 }

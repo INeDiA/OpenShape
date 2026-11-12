@@ -1,18 +1,4 @@
-import type {
-  BooleanOp,
-  Document,
-  EdgeTreatmentFeature,
-  ExtrudeFeature,
-  Feature,
-  PlaneName,
-  ImportFeature,
-  MirrorFeature,
-  PatternFeature,
-  PushPullFeature,
-  RevolveFeature,
-  ShellFeature,
-  SketchFeature,
-} from "./types";
+import type { BooleanOp, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, PlaneName, ImportFeature, MirrorFeature, PatternFeature, PushPullFeature, RevolveFeature, ShellFeature, SketchFeature, CoveFeature } from "./types";
 import { emptySketch, type SketchData } from "../sketch/model";
 import { addCircle, addConstraint, addRectangle } from "../sketch/builders";
 
@@ -70,6 +56,10 @@ export function makeEdgeTreatment(doc: Document, type: "fillet" | "chamfer"): Ed
     size: 1,
     edges: [],
   };
+}
+
+export function makeCove(doc: Document, edges: string[], size = 2): CoveFeature {
+  return { type: "cove", id: newId("cv"), name: nextName(doc, "Cove"), suppressed: false, size, edges };
 }
 
 export function makeSketchOnFace(doc: Document, face: string): SketchFeature {

@@ -84,3 +84,49 @@ describe("sketch camera", () => {
     expect(((1 - p.y) / 2) * h - h / 2).toBeCloseTo(-10 * scale, 6);
   });
 });
+
+describe("wheel in auto mode", () => {
+  const wheel = (o: Partial<WheelEvent>) => ({ deltaMode: 0, deltaX: 0, deltaY: 0, ctrlKey: false, shiftKey: false, clientX: 450, clientY: 300, timeStamp: 0, ...o }) as WheelEvent;
+
+  it("zooms with a smooth-scrolling mouse (small, fractional vertical deltas)", () => {
+    const { camera, controls, nav } = setup();
+    const d0 = camera.position.distanceTo(controls.target);
+    const dir0 = camera.position.clone().sub(controls.target).normalize();
+    for (let i = 0; i < 10; i++) nav.wheel(wheel({ deltaY: 3.75, timeStamp: i * 16 }));
+    expect(camera.position.distanceTo(controls.target)).toBeGreaterThan(d0);
+    // Pure zoom: the view direction doesn't change.
+    expect(camera.position.clone().sub(controls.target).normalize().dot(dir0)).toBeCloseTo(1, 6);
+  });
+
+  it("keeps zooming when a mouse lets a little sideways motion through", () => {
+    // Recorded from a touch-surface mouse: dx 3 next to dy -12, in the middle of a scroll.
+    const { camera, controls, nav } = setup();
+    const dir0 = camera.position.clone().sub(controls.target).normalize();
+    const d0 = camera.position.distanceTo(controls.target);
+    nav.wheel(wheel({ deltaY: -14, timeStamp: 0 }));
+    nav.wheel(wheel({ deltaX: 3, deltaY: -12, timeStamp: 16 }));
+    nav.wheel(wheel({ deltaX: 3, deltaY: -13, timeStamp: 32 }));
+    nav.wheel(wheel({ deltaY: -14, timeStamp: 48 }));
+    expect(camera.position.distanceTo(controls.target)).toBeLessThan(d0 * 0.95);
+    expect(camera.position.clone().sub(controls.target).normalize().dot(dir0)).toBeCloseTo(1, 6);
+  });
+
+  it("zooms out around the orbit center, not the cursor", () => {
+    const point = new THREE.Vector3(18, -15, 18); // on the model, off center
+    const { controls, nav } = setup(point);
+    const t0 = controls.target.clone();
+    for (let i = 0; i < 20; i++) nav.zoomAt(1.1, 700, 500);
+    expect(controls.target.distanceTo(t0)).toBeLessThan(1e-9);
+  });
+
+  it("orbits once a gesture moves sideways, until the gesture ends", () => {
+    const { camera, controls, nav } = setup();
+    const dir0 = camera.position.clone().sub(controls.target).normalize();
+    nav.wheel(wheel({ deltaX: 6, deltaY: 1, timeStamp: 0 }));
+    nav.wheel(wheel({ deltaY: 4, timeStamp: 16 })); // same gesture, vertical only: still orbit
+    const d1 = camera.position.distanceTo(controls.target);
+    expect(camera.position.clone().sub(controls.target).normalize().dot(dir0)).toBeLessThan(0.9999);
+    nav.wheel(wheel({ deltaY: 4, timeStamp: 1000 })); // new gesture, vertical: zoom
+    expect(camera.position.distanceTo(controls.target)).not.toBeCloseTo(d1, 3);
+  });
+});

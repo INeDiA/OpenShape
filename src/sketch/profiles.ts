@@ -17,6 +17,12 @@ export type Loop =
 
 export interface ProfileResult {
   loops: Loop[];
+  /**
+   * Stable id of each loop (same order): the ids of the curves bounding it,
+   * sorted and joined by "+", with "#k" when several loops share them. It
+   * survives edits that move geometry, and changes when the boundary does.
+   */
+  regionIds: string[];
   /** Curves that are not part of any closed loop (shown, but ignored by solids). */
   openCurves: string[];
 }
@@ -58,6 +64,7 @@ const ON_TOL = 1e-5;
 export function findLoops(s: SketchData): ProfileResult {
   const m = entityMap(s);
   const loops: Loop[] = [];
+  const ids: string[] = [];
 
   // Union-find over point ids so coincident points act as one vertex.
   const parent = new Map<string, string>();
@@ -144,7 +151,10 @@ export function findLoops(s: SketchData): ProfileResult {
       } else {
         const on = [...vertices].filter(([, p]) => onCurve(p)).map(([v, p]) => ({ v, t: ang(ctr.x, ctr.y, p) }));
         if (on.length < 2) {
-          if (r > TOL) loops.push({ kind: "circle", cx: ctr.x, cy: ctr.y, r });
+          if (r > TOL) {
+            loops.push({ kind: "circle", cx: ctr.x, cy: ctr.y, r });
+            ids.push(c.id);
+          }
           continue;
         }
         on.sort((x, y) => x.t - y.t);
@@ -169,11 +179,17 @@ export function findLoops(s: SketchData): ProfileResult {
       });
     } else if (c.kind === "ellipse") {
       const g = ellipseGeom(m, c);
-      if (g.a > TOL && g.b > TOL) loops.push({ kind: "ellipse", ...g });
+      if (g.a > TOL && g.b > TOL) {
+        loops.push({ kind: "ellipse", ...g });
+        ids.push(c.id);
+      }
     } else if (c.kind === "spline" && c.closed && c.points.length >= 3) {
       const pts = splinePoints(m, c);
       const loop: Loop = { kind: "path", start: pts[0], segments: splineBeziers(pts, true).map((b) => ({ kind: "bezier", ...b })) };
-      if (loopArea(loop) > TOL) loops.push(loop);
+      if (loopArea(loop) > TOL) {
+        loops.push(loop);
+        ids.push(c.id);
+      }
     }
   }
 
@@ -219,12 +235,20 @@ export function findLoops(s: SketchData): ProfileResult {
     // Bounded faces run counter-clockwise; the outside of each component comes out clockwise.
     if (polygonArea(loopPolygon(loop)) > TOL) {
       loops.push(loop);
+      ids.push([...new Set(face.map((x) => x.p.curve))].sort().join("+"));
       for (const x of face) inLoop.add(x.p.curve);
     }
   }
 
   const openCurves = [...new Set(pieces.map((p) => p.curve))].filter((id) => !inLoop.has(id));
-  return { loops, openCurves };
+  // Loops bounded by the same curves (rare) are told apart by position.
+  const count = new Map<string, number>();
+  const regionIds = ids.map((id) => {
+    const k = (count.get(id) ?? 0) + 1;
+    count.set(id, k);
+    return k === 1 ? id : `${id}#${k}`;
+  });
+  return { loops, regionIds, openCurves };
 }
 
 /** Polyline approximation of a loop (arcs sampled), for area and containment. */
@@ -285,7 +309,7 @@ export function loopArea(l: Loop): number {
 }
 
 /** A point just inside the loop (off its boundary, which neighbouring regions share). */
-function samplePoint(l: Loop): Pt {
+export function samplePoint(l: Loop): Pt {
   if (l.kind === "circle") return [l.cx + l.r * 0.999, l.cy];
   if (l.kind === "ellipse") return [l.cx + l.a * 0.999 * Math.cos(l.angle), l.cy + l.a * 0.999 * Math.sin(l.angle)];
   const poly = loopPolygon(l);
@@ -325,4 +349,49 @@ export function nestLoops(loops: Loop[]): { loop: Loop; depth: number }[] {
     const depth = sorted.slice(0, i).filter((o) => loopContains(o, pt)).length;
     return { loop, depth };
   });
+}
+
+/** A region of a sketch: a loop minus the loops directly inside it. */
+export interface Region {
+  id: string;
+  loop: Loop;
+  holes: Loop[];
+}
+
+/**
+ * The regions a user can pick: every loop becomes one, with the loops nested
+ * directly inside it as holes (a rectangle with a circle in it gives the ring
+ * and the disc). Neighbouring loops stay separate regions.
+ */
+export function sketchRegions(s: SketchData): Region[] {
+  const { loops, regionIds } = findLoops(s);
+  const order = loops.map((_, i) => i).sort((a, b) => loopArea(loops[a]) - loopArea(loops[b])); // small first
+  const parent = new Map<number, number>();
+  for (const i of order) {
+    const pt = samplePoint(loops[i]);
+    // The smallest larger loop containing it.
+    const p = order.find((j) => j !== i && loopArea(loops[j]) > loopArea(loops[i]) && loopContains(loops[j], pt));
+    if (p !== undefined) parent.set(i, p);
+  }
+  return loops.map((loop, i) => ({
+    id: regionIds[i],
+    loop,
+    holes: loops.filter((_, j) => parent.get(j) === i),
+  }));
+}
+
+/** A point inside a region and outside its holes: edge midpoints nudged inwards, longest edges first. */
+export function regionInteriorPoint(r: Region): Pt {
+  const poly = loopPolygon(r.loop);
+  const sign = polygonArea(poly) > 0 ? 1 : -1;
+  const edges = poly.map((p, i) => [p, poly[(i + 1) % poly.length]] as const).sort((a, b) => Math.hypot(b[1][0] - b[0][0], b[1][1] - b[0][1]) - Math.hypot(a[1][0] - a[0][0], a[1][1] - a[0][1]));
+  for (const [[x1, y1], [x2, y2]] of edges) {
+    const len = Math.hypot(x2 - x1, y2 - y1) || 1;
+    for (const depth of [0.02, 0.1, 0.3]) {
+      const k = (sign * Math.min(len * depth, 1)) / len;
+      const p: Pt = [(x1 + x2) / 2 - (y2 - y1) * k, (y1 + y2) / 2 + (x2 - x1) * k];
+      if (loopContains(r.loop, p) && !r.holes.some((h) => loopContains(h, p))) return p;
+    }
+  }
+  return samplePoint(r.loop);
 }

@@ -1,4 +1,4 @@
-import type { Document, KernelRequest, KernelResponse } from "../model/types";
+import type { Document, KernelRequest, KernelResponse, Measurement, MeasureSelection } from "../model/types";
 
 type Evaluated = Extract<KernelResponse, { kind: "evaluated" }>;
 
@@ -13,17 +13,20 @@ export class KernelClient {
   private inFlight = false;
   private queued: { doc: Document; stopBefore?: string; preview?: boolean } | null = null;
   private pendingExports = new Map<number, (r: Extract<KernelResponse, { kind: "exported" }>) => void>();
+  private pendingMeasures = new Map<number, (r: Extract<KernelResponse, { kind: "measured" }>) => void>();
 
-  onReady: () => void = () => {};
+  onReady: (threads: number) => void = () => {};
   onInitError: (e: string) => void = () => {};
   onEvaluated: (r: Evaluated) => void = () => {};
+  /** True while an evaluation is running or waiting to run. */
+  onBusy: (busy: boolean) => void = () => {};
 
   constructor() {
     this.worker.onmessage = (ev: MessageEvent<KernelResponse>) => {
       const msg = ev.data;
       switch (msg.kind) {
         case "ready":
-          this.onReady();
+          this.onReady(msg.threads ?? 1);
           break;
         case "init-error":
           this.onInitError(msg.error);
@@ -38,7 +41,11 @@ export class KernelClient {
             const q = this.queued;
             this.queued = null;
             this.dispatch(q.doc, q.stopBefore, q.preview);
-          }
+          } else this.onBusy(false);
+          break;
+        case "measured":
+          this.pendingMeasures.get(msg.seq)?.(msg);
+          this.pendingMeasures.delete(msg.seq);
           break;
         case "exported":
           this.pendingExports.get(msg.seq)?.(msg);
@@ -60,6 +67,7 @@ export class KernelClient {
   private dispatch(doc: Document, stopBefore?: string, preview = false) {
     const seq = ++this.seq;
     this.inFlight = true;
+    this.onBusy(true);
     this.send({ kind: "evaluate", seq, doc, stopBefore, preview });
   }
 
@@ -70,6 +78,15 @@ export class KernelClient {
   /** Fine tessellation for mesh formats (STL, 3MF, ...). */
   exportMesh(doc: Document): Promise<{ vertices: Float32Array; triangles: Uint32Array }> {
     return this.request(doc, "mesh").then((r) => r.mesh!);
+  }
+
+  /** Measures faces/edges/a body of the final model of `doc`. */
+  measure(doc: Document, selection: MeasureSelection): Promise<Measurement> {
+    const seq = ++this.seq;
+    return new Promise((resolve, reject) => {
+      this.pendingMeasures.set(seq, (r) => (r.error || !r.measurement ? reject(new Error(r.error ?? "No result")) : resolve(r.measurement)));
+      this.send({ kind: "measure", seq, doc, selection });
+    });
   }
 
   private request(doc: Document, format: "step" | "mesh") {

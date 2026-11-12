@@ -216,5 +216,28 @@ export function measure(s: SketchData, c: DistributiveOmit<DimensionConstraint, 
   }
 }
 
+/** Lines of a sketch with readable names ("Line 2", "Construction 1"), for choosing an axis. */
+export function sketchLines(s: SketchData): { id: string; label: string; construction: boolean }[] {
+  let n = 0, c = 0;
+  return s.entities
+    .filter((e): e is SkLine => e.kind === "line")
+    .map((l) => ({ id: l.id, construction: !!l.construction, label: l.construction ? `Construction ${++c}` : `Line ${++n}` }));
+}
+
+/**
+ * The line a revolve should turn around by default: a construction line if
+ * there is one (that's what they're for), else the longest line.
+ */
+export function defaultAxisLine(s: SketchData): string | undefined {
+  const m = entityMap(s);
+  const lines = s.entities.filter((e): e is SkLine => e.kind === "line");
+  const len = (l: SkLine) => {
+    const a = pointOf(m, l.p1), b = pointOf(m, l.p2);
+    return Math.hypot(b.x - a.x, b.y - a.y);
+  };
+  const pick = (ls: SkLine[]) => ls.sort((a, b) => len(b) - len(a))[0]?.id;
+  return pick(lines.filter((l) => l.construction)) ?? pick(lines);
+}
+
 let seq = 0;
 export const skId = (prefix: string) => `${prefix}${Date.now().toString(36)}${(seq++).toString(36)}`;

@@ -1,22 +1,28 @@
 /// <reference lib="webworker" />
-import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
+import multiWasmUrl from "replicad-opencascadejs/multi/wasm?url";
 import { setOC } from "replicad";
+import { setBooleanParallel } from "./booleans";
 import type { KernelRequest, KernelResponse } from "../model/types";
 import { evaluate, meshBody } from "./evaluate";
+import { measureSelection } from "./measure";
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 const post = (msg: KernelResponse, transfer: Transferable[] = []) => ctx.postMessage(msg, transfer);
 
-const ready = opencascade({ locateFile: () => wasmUrl })
-  .then((oc) => {
-    setOC(oc);
-    post({ kind: "ready" });
-  })
-  .catch((e) => {
-    post({ kind: "init-error", error: String(e) });
-    throw e;
-  });
+// With cross-origin isolation (SharedArrayBuffer available) load the multi-threaded
+// OCCT build and run Booleans in parallel; otherwise the single-threaded one.
+const threaded = ctx.crossOriginIsolated === true;
+const ready = (async () => {
+  const mod = threaded ? await import("replicad-opencascadejs/multi") : await import("replicad-opencascadejs");
+  const oc = await mod.default({ locateFile: () => (threaded ? multiWasmUrl : wasmUrl) });
+  setOC(oc);
+  setBooleanParallel(threaded);
+  post({ kind: "ready", threads: threaded ? navigator.hardwareConcurrency : 1 });
+})().catch((e) => {
+  post({ kind: "init-error", error: String(e) });
+  throw e;
+});
 
 async function handleEvaluate(req: Extract<KernelRequest, { kind: "evaluate" }>) {
   const t0 = performance.now();
@@ -65,6 +71,19 @@ async function handleExport(req: Extract<KernelRequest, { kind: "export" }>) {
   }
 }
 
+async function handleMeasure(req: Extract<KernelRequest, { kind: "measure" }>) {
+  try {
+    const result = await evaluate(req.doc);
+    try {
+      post({ kind: "measured", seq: req.seq, measurement: measureSelection(result, req.selection) });
+    } finally {
+      if (result.ownsBody) result.body?.shape.delete();
+    }
+  } catch (e) {
+    post({ kind: "measured", seq: req.seq, error: String(e) });
+  }
+}
+
 // Requests run one at a time: evaluation is async (imports) and must not interleave.
 let queue: Promise<void> = Promise.resolve();
 ctx.onmessage = (ev: MessageEvent<KernelRequest>) => {
@@ -73,5 +92,6 @@ ctx.onmessage = (ev: MessageEvent<KernelRequest>) => {
     await ready;
     if (req.kind === "evaluate") await handleEvaluate(req);
     else if (req.kind === "export") await handleExport(req);
+    else if (req.kind === "measure") await handleMeasure(req);
   });
 };

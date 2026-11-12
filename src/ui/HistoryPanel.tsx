@@ -21,6 +21,7 @@ const ICON: Record<Feature["type"], string> = {
   revolve: "↻",
   fillet: "◜",
   chamfer: "◸",
+  cove: "◟",
   pushpull: "⇕",
   shell: "▢",
   mirror: "⇋",

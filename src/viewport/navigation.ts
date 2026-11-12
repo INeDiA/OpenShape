@@ -4,6 +4,12 @@
 // Wheel input:   pinch (ctrl+wheel) or mouse wheel  -> zoom at cursor
 //                two-finger scroll (trackpad)        -> orbit
 //                shift + two-finger scroll           -> pan
+// In "auto" mode a scroll gesture counts as a trackpad only when it moves
+// mostly sideways before it has zoomed: mice (even touch-surface ones that
+// let a little sideways motion through) scroll vertically.
+//
+// Zooming in goes towards the point under the cursor; zooming out backs away
+// from the orbit center, so the center stays on the model.
 // Mouse drag (OrbitControls): left orbit, right/middle pan.
 
 import * as THREE from "three";
@@ -30,11 +36,15 @@ interface Tween {
   duration: number;
 }
 
+const GESTURE_GAP = 200;
+
 const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
 export class CameraNav {
   private tween: Tween | null = null;
   mode: NavMode = "auto";
+  /** Current scroll gesture (events less than GESTURE_GAP ms apart) and whether it's a trackpad. */
+  private gesture = { last: -Infinity, trackpad: false, zoomed: false };
 
   constructor(
     private camera: THREE.PerspectiveCamera,
@@ -103,8 +113,17 @@ export class CameraNav {
   /** Interprets a wheel event; returns false when it should be left alone. */
   wheel(ev: WheelEvent): boolean {
     this.tween = null;
-    const trackpadLike = ev.deltaMode === 0 && (ev.deltaX !== 0 || !Number.isInteger(ev.deltaY) || Math.abs(ev.deltaY) < 40);
-    const scrollIsOrbit = this.mode === "trackpad" || (this.mode === "auto" && trackpadLike);
+    const now = ev.timeStamp || performance.now();
+    const g = this.gesture;
+    if (now - g.last > GESTURE_GAP) {
+      g.trackpad = false;
+      g.zoomed = false;
+    }
+    g.last = now;
+    // Mostly sideways movement means two fingers on a trackpad; the rest of that gesture
+    // stays a trackpad one. A gesture that already zoomed keeps zooming.
+    if (!g.zoomed && ev.deltaMode === 0 && !ev.shiftKey && Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) g.trackpad = true;
+    const scrollIsOrbit = this.mode === "trackpad" || (this.mode === "auto" && this.gesture.trackpad);
     if (ev.ctrlKey) {
       // Pinch on a trackpad (browsers report it as ctrl+wheel).
       this.zoomAt(Math.exp(ev.deltaY * 0.01), ev.clientX, ev.clientY);
@@ -115,17 +134,22 @@ export class CameraNav {
       // Mouse wheel: zoom (line-based deltas are scaled up).
       const dy = ev.deltaMode === 1 ? ev.deltaY * 33 : ev.deltaY;
       this.zoomAt(Math.exp(dy * 0.0015), ev.clientX, ev.clientY);
+      if (dy !== 0) g.zoomed = true;
     }
     return true;
   }
 
-  /** Scales the camera distance around the point under the cursor (factor < 1 zooms in). */
+  /**
+   * Scales the camera distance (factor < 1 zooms in): in towards the point under
+   * the cursor, out away from the orbit center (zooming out around the cursor
+   * would push the center off the model, behind the surface that was pointed at).
+   */
   zoomAt(factor: number, clientX: number, clientY: number) {
     const cam = this.camera, target = this.controls.target;
     const dist = cam.position.distanceTo(target);
     const next = THREE.MathUtils.clamp(dist * factor, 0.5, 20000);
     factor = next / dist;
-    const p = this.pickPoint(clientX, clientY) ?? this.pointOnTargetPlane(clientX, clientY) ?? target.clone();
+    const p = factor >= 1 ? target.clone() : (this.pickPoint(clientX, clientY) ?? this.pointOnTargetPlane(clientX, clientY) ?? target.clone());
     cam.position.sub(p).multiplyScalar(factor).add(p);
     target.sub(p).multiplyScalar(factor).add(p);
     cam.lookAt(target);

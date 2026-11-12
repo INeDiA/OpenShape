@@ -57,7 +57,7 @@ Every feature has:
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | Unique within the document. Referenced by other features. |
-| `type` | string | `sketch`, `extrude`, `revolve`, `fillet`, `chamfer`, `pushpull`, `shell`, `mirror`, `pattern`, `transform`, `import` |
+| `type` | string | `sketch`, `extrude`, `revolve`, `fillet`, `chamfer`, `cove`, `pushpull`, `shell`, `mirror`, `pattern`, `transform`, `import` |
 | `name` | string | Display name. |
 | `suppressed` | boolean | Skipped during replay when true. |
 | `exprs` | object, optional | Maps a numeric field name to an expression, e.g. `{ "distance": "height / 2" }`. The field still holds the last computed number. |
@@ -65,9 +65,17 @@ Every feature has:
 Type-specific fields:
 
 - **sketch**: `plane` (`"XY"`, `"XZ"`, `"YZ"`), optional `face` (persistent name of a planar face; when set, `plane` is ignored), `offset` (number, along the plane normal), `sketch` (see below).
-- **extrude**: `sketchId` (an earlier sketch), `distance` (may be negative), `op`.
-- **revolve**: `sketchId`, `axis` (`"X"`, `"Y"`, `"Z"`), `angle` (degrees), `op`.
+- **extrude**: `sketchId` (an earlier sketch), `distance` (may be negative), `op`, `regions?`.
+- **revolve**: `sketchId`, `axis` (`"X"`, `"Y"`, `"Z"`: a world axis through the origin), `axisLine?` (id of a line of the sketch to turn around instead; it takes precedence over `axis`), `angle` (degrees), `op`, `regions?`.
+
+  `regions` (optional) lists the sketch regions to use; without it every closed
+  region is used (nested loops become holes). A region is a closed loop minus the
+  loops directly inside it, and its id is the ids of the curves bounding the loop,
+  sorted and joined by `+` (with `#k` when several loops share the same curves),
+  so it survives geometry changes that keep the boundary. A listed region that no
+  longer exists makes the feature fail rather than use a different one.
 - **fillet / chamfer**: `size` (radius or distance), `edges` (list of persistent edge names; empty means every edge), optional `overrides` (edge name → size for edges that differ from `size`).
+- **cove**: `size` (radius), `edges` (at least one persistent edge name). Removes a cylinder of that radius centred on each edge (a torus segment for circular edges), leaving a concave quarter-round groove; straight and circular edges only. New faces are named `<coveId>:cove:<edge>`.
 - **pushpull**: `face` (persistent name of a planar face), `distance` (positive adds material, negative removes it). The face is moved: walls stretch and fillets or holes on it travel along; when the shape around the face doesn't allow that, the face is extruded instead.
 - **shell**: `faces` (persistent names of faces to open), `thickness` (inward).
 - **mirror**: `plane` (`"XY"`, `"XZ"`, `"YZ"`), `offset`. The mirrored copy is joined to the body.

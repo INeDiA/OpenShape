@@ -21,12 +21,15 @@ const readNavMode = (): NavMode => {
 export interface HoverInfo {
   face?: string;
   edge?: string;
+  region?: string;
+  sketch?: string;
 }
 
 /** On-model manipulators. Arrows report a signed distance, rings an angle in degrees. */
 export type Handle =
   | { id: string; kind: "arrow"; origin: Vec3; dir: Vec3; color: number }
-  | { id: string; kind: "ring"; center: Vec3; axis: Vec3; color: number };
+  /** `arc` (degrees) draws only part of the ring, centered on the knob; full circle when absent. */
+  | { id: string; kind: "ring"; center: Vec3; axis: Vec3; color: number; arc?: number; toward?: Vec3; turn?: number };
 
 export type DragPhase = "start" | "move" | "end";
 
@@ -59,6 +62,10 @@ interface Props {
   rigidPreview: { body: string; matrix: number[] } | null;
   /** Translucent prism showing a push/pull before the kernel result arrives. */
   ghost: { mesh: MeshData; face: string; distance: number } | null;
+  /** Translucent swept volume of an extrude or revolve being dragged. */
+  sweep?: { positions: Float32Array; cut: boolean; fillet?: { normals: Float32Array; bands: Float32Array } } | null;
+  /** Faces not drawn (e.g. a fillet whose new radius is being previewed). */
+  hiddenFaces?: string[];
   /** Changing this number re-frames the model (new/opened document). */
   fitKey: number;
   /**
@@ -69,7 +76,19 @@ interface Props {
   sketchCamera?: SketchCamera | null;
   /** Sketch not drawn in 3D (the one being edited draws itself). */
   hiddenSketchId?: string | null;
+  /** Sketch regions that can be clicked, as "sketchId/regionId" keys. */
+  pickableRegions?: Set<string>;
+  /** Selected regions ("sketchId/regionId"). */
+  selectedRegions?: string[];
+  onPickRegion?: (sketchId: string, regionId: string, additive: boolean) => void;
+  /** Double click on a sketch region opens the sketch. */
+  onEditSketch?: (sketchId: string) => void;
+  /** While choosing a revolve axis: the lines to pick from (clicks pick only these). */
+  axisCandidates?: { id: string; a: Vec3; b: Vec3; world: boolean }[];
+  onPickAxis?: (id: string) => void;
 }
+
+export const regionKey = (sketchId: string, regionId: string) => `${sketchId}/${regionId}`;
 
 
 const mat = (color: number) => new THREE.MeshStandardMaterial({ color, metalness: 0.1, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
@@ -80,16 +99,32 @@ const BODY_SELECTED = mat(0xc9d8f2);
 const EDGE = new THREE.LineBasicMaterial({ color: 0x1d2633 });
 const SKETCH = new THREE.LineBasicMaterial({ color: 0xff9f1a });
 const SKETCH_SEL = new THREE.LineBasicMaterial({ color: 0xff3d71 });
-const EDGE_SELECTED = new LineMaterial({ color: 0xff3d71, linewidth: 4, worldUnits: false });
-const EDGE_HOVER = new LineMaterial({ color: 0x4f8cff, linewidth: 4, worldUnits: false });
+const EDGE_SELECTED = new LineMaterial({ color: 0xff3d71, linewidth: 2.5, worldUnits: false });
+const EDGE_HOVER = new LineMaterial({ color: 0x4f8cff, linewidth: 2.5, worldUnits: false });
+const AXIS = new LineMaterial({ color: 0x8e6cf0, linewidth: 2.5, worldUnits: false });
+const AXIS_WORLD = new LineMaterial({ color: 0x8e6cf0, linewidth: 2, worldUnits: false, dashed: true, dashSize: 4, gapSize: 3, transparent: true, opacity: 0.7 });
+const AXIS_HOVER = new LineMaterial({ color: 0x4f8cff, linewidth: 4, worldUnits: false });
 const HIDDEN = new THREE.MeshBasicMaterial({ visible: false });
+// Sketch regions: drawn just in front of coplanar faces.
+const regionMat = (color: number, opacity: number) =>
+  new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 });
+const REGION = regionMat(0xff9f1a, 0.1);
+const REGION_HOVER = regionMat(0x4f8cff, 0.25);
+const REGION_SEL = regionMat(0xff3d71, 0.3);
 const GHOST_ADD = new THREE.MeshBasicMaterial({ color: 0x4f8cff, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide });
+// Fillet preview: a shaded rounded surface drawn over the solid, and the face bands it removes.
+const FILLET_ARC = new THREE.MeshStandardMaterial({ color: 0xff9ab8, metalness: 0.05, roughness: 0.45, transparent: true, opacity: 0.92, depthTest: false, side: THREE.DoubleSide });
+const FILLET_BAND = new THREE.MeshBasicMaterial({ color: 0xff3d71, transparent: true, opacity: 0.35, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
 const GHOST_CUT = new THREE.MeshBasicMaterial({ color: 0xff3d71, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide });
 
 interface HandleObject {
   handle: Handle;
   group: THREE.Group;
   collider: THREE.Object3D;
+  /** Ring knob: kept facing the camera. */
+  knob?: THREE.Object3D;
+  /** Ring contents, turned about the axis while dragging so the knob follows the cursor. */
+  spin?: THREE.Object3D;
 }
 
 interface SceneState {
@@ -111,12 +146,22 @@ interface SceneState {
   selectedBody: string | null;
   /** Body hidden from the main mesh because a rigid preview draws it. */
   hiddenBody: string | null;
+  hiddenFaces: Set<string>;
   rigid: { body: string; group: THREE.Group; others: THREE.LineSegments } | null;
   ghost: THREE.Mesh | null;
+  sweep: THREE.Object3D | null;
   dragging: boolean;
   nav: CameraNav | null;
   /** Bounds of the current mesh, for fit and standard views. */
   box: THREE.Box3 | null;
+  /** Pickable sketch region meshes. */
+  regions: { mesh: THREE.Mesh; key: string; sketch: string; id: string }[];
+  hoveredRegion: string | null;
+  selectedRegions: Set<string>;
+  /** Revolve axis candidates being offered. */
+  axisGroup: THREE.Group;
+  axes: { line: LineSegments2; id: string; world: boolean }[];
+  hoveredAxis: string | null;
   fitted: boolean;
 }
 
@@ -160,12 +205,14 @@ export function Viewport(props: Props) {
     const model = new THREE.Group();
     const overlayGroup = new THREE.Group();
     const gizmos = new THREE.Group();
-    scene.add(model, overlayGroup, gizmos);
+    const axisGroup = new THREE.Group();
+    scene.add(model, overlayGroup, gizmos, axisGroup);
 
     const s: SceneState = {
       renderer, scene, camera, controls, model, overlay: overlayGroup, gizmos, handleObjects: [],
       body: null, edgeLines: null, mesh: null, hoveredFace: null, hoveredEdge: null, hoveredHandle: null,
-      selectedFaces: new Set(), selectedBody: null, hiddenBody: null, rigid: null, ghost: null, dragging: false, nav: null, box: null, fitted: false,
+      selectedFaces: new Set(), selectedBody: null, hiddenBody: null, hiddenFaces: new Set(), rigid: null, ghost: null, sweep: null, dragging: false, nav: null, box: null, fitted: false,
+      regions: [], hoveredRegion: null, selectedRegions: new Set(), axisGroup, axes: [], hoveredAxis: null,
     };
     state.current = s;
 
@@ -187,6 +234,9 @@ export function Viewport(props: Props) {
       camera.updateProjectionMatrix();
       EDGE_SELECTED.resolution.set(w, h);
       EDGE_HOVER.resolution.set(w, h);
+      for (const m of [AXIS, AXIS_WORLD, AXIS_HOVER]) m.resolution.set(w, h);
+      HANDLE_RES.set(w, h);
+      for (const m of HANDLE_LINES) m.resolution.set(w, h);
     };
     const ro = new ResizeObserver(resize);
     ro.observe(el);
@@ -220,7 +270,8 @@ export function Viewport(props: Props) {
       if (bodyHit?.faceIndex != null) {
         const idx = bodyHit.faceIndex * 3;
         const fi = s.mesh.faceGroups.findIndex((g) => idx >= g.start && idx < g.start + g.count);
-        if (fi >= 0 && s.mesh.faceNames[fi].includes(":blend:")) px = 2;
+        // Fillet and cove faces can be thin: their own edges mustn't swallow every click on them.
+        if (fi >= 0 && /:blend:|:cove:/.test(s.mesh.faceNames[fi])) px = 2;
       }
       ray.params.Line = { threshold: (dist * Math.tan((camera.fov * Math.PI) / 360) * 2 * px) / r.height };
       const hit = ray.intersectObject(s.edgeLines)[0];
@@ -228,6 +279,24 @@ export function Viewport(props: Props) {
       if (bodyHit && bodyHit.distance < hit.distance - 0.5) return null; // occluded
       const i = s.mesh.edgeGroups.findIndex((g) => hit.index! >= g.start && hit.index! < g.start + g.count);
       return i < 0 ? null : i;
+    };
+
+    /** Revolve axis candidate under the cursor (a few pixels of tolerance). */
+    const pickAxis = (): SceneState["axes"][number] | null => {
+      if (!s.axes.length) return null;
+      ray.params.Line2 = { threshold: 6 };
+      const hit = ray.intersectObjects(s.axes.map((x) => x.line), false)[0];
+      return hit ? (s.axes.find((x) => x.line === hit.object) ?? null) : null;
+    };
+
+    /** Sketch region under the cursor, unless the body is in front of it. */
+    const pickRegion = (): SceneState["regions"][number] | null => {
+      if (!s.regions.length) return null;
+      const hit = ray.intersectObjects(s.regions.map((r) => r.mesh), false)[0];
+      if (!hit) return null;
+      const bodyHit = s.body ? ray.intersectObject(s.body)[0] : undefined;
+      if (bodyHit && bodyHit.distance < hit.distance - 0.05) return null;
+      return s.regions.find((r) => r.mesh === hit.object) ?? null;
     };
 
     const pickFace = (): number | null => {
@@ -273,12 +342,23 @@ export function Viewport(props: Props) {
         const v = handleValue(drag.h.handle);
         if (v == null) return;
         let value = v - drag.t0;
-        if (drag.h.handle.kind === "ring") value = ((value + 540) % 360) - 180;
+        // Rings report an angle in (-180, 180]: follow it continuously so a drag can go round.
+        if (drag.h.handle.kind === "ring") value = drag.last + ((((value - drag.last) % 360) + 540) % 360) - 180;
         drag.last = value;
         latest.current.onHandleDrag(drag.h.handle.id, value, "move");
         return;
       }
       if (ev.buttons) return;
+      // Choosing a revolve axis: only the candidate lines react.
+      if (s.axes.length) {
+        const a = pickAxis();
+        if ((a?.id ?? null) !== s.hoveredAxis) {
+          s.hoveredAxis = a?.id ?? null;
+          styleAxes(s);
+          renderer.domElement.style.cursor = a ? "pointer" : "";
+        }
+        return;
+      }
       const h = pickHandle();
       const hid = h?.handle.id ?? null;
       if (hid !== s.hoveredHandle) {
@@ -286,16 +366,23 @@ export function Viewport(props: Props) {
         renderer.domElement.style.cursor = hid ? "grab" : "";
         styleHandles(s);
       }
-      if (h || !s.mesh) return;
-      const edge = pickEdge();
-      const face = edge == null && !latest.current.edgesOnly ? pickFace() : null;
+      if (h) return;
+      const edge = s.mesh ? pickEdge() : null;
+      const region = edge == null && !latest.current.edgesOnly ? pickRegion() : null;
+      if ((region?.key ?? null) !== s.hoveredRegion) {
+        s.hoveredRegion = region?.key ?? null;
+        applyRegionMaterials(s);
+        if (region) latest.current.onHover({ region: region.id, sketch: region.sketch });
+      }
+      if (!s.mesh) return;
+      const face = edge == null && !region && !latest.current.edgesOnly ? pickFace() : null;
       if (edge !== s.hoveredEdge || face !== s.hoveredFace) {
         s.hoveredEdge = edge;
         s.hoveredFace = face;
         applyFaceMaterials(s);
         rebuildOverlay(s, latest.current.selectedEdges);
         const m = s.mesh;
-        latest.current.onHover(edge != null ? { edge: m.edgeNames[edge] } : face != null ? { face: m.faceNames[face] } : null);
+        if (!region) latest.current.onHover(edge != null ? { edge: m.edgeNames[edge] } : face != null ? { face: m.faceNames[face] } : null);
       }
     };
 
@@ -333,18 +420,29 @@ export function Viewport(props: Props) {
       }
       const d = down;
       down = null;
-      if (!d || Math.hypot(ev.clientX - d.x, ev.clientY - d.y) > 4 || ev.button !== 0 || !s.mesh) return;
+      if (!d || Math.hypot(ev.clientX - d.x, ev.clientY - d.y) > 4 || ev.button !== 0) return;
       setRay(ev);
+      if (s.axes.length) {
+        const a = pickAxis();
+        if (a) latest.current.onPickAxis?.(a.id);
+        return;
+      }
       const additive = ev.shiftKey || ev.metaKey;
-      const edge = pickEdge();
-      if (edge != null) return latest.current.onPickEdge(s.mesh.edgeNames[edge], additive);
+      const edge = s.mesh ? pickEdge() : null;
+      if (edge != null) return latest.current.onPickEdge(s.mesh!.edgeNames[edge], additive);
       if (latest.current.edgesOnly) return;
+      const region = pickRegion();
+      if (region) return latest.current.onPickRegion?.(region.sketch, region.id, additive);
+      if (!s.mesh) return latest.current.onPickFace(null, additive);
       const face = pickFace();
       latest.current.onPickFace(face != null ? s.mesh.faceNames[face] : null, additive);
     };
     const onDbl = (ev: MouseEvent) => {
-      if (!s.mesh) return;
+      if (s.axes.length) return;
       setRay(ev);
+      const region = pickRegion();
+      if (region) return latest.current.onEditSketch?.(region.sketch);
+      if (!s.mesh) return;
       const face = pickFace();
       if (face != null && s.mesh.faceBody[face]) latest.current.onPickBody(s.mesh.faceBody[face]);
     };
@@ -395,11 +493,14 @@ export function Viewport(props: Props) {
       camera.near = Math.max(0.01, d / 2000);
       camera.far = Math.max(1000, d * 50);
       camera.updateProjectionMatrix();
-      // Handles keep a constant on-screen size.
+      // Handles are modelled in pixels: scale them to world units at their distance, so they
+      // keep the same on-screen size at any zoom and window size.
+      const perPixel = (2 * Math.tan((camera.fov * Math.PI) / 360)) / (el.clientHeight || 1);
       for (const ho of s.handleObjects) {
         const anchor = ho.handle.kind === "arrow" ? ho.handle.origin : ho.handle.center;
         const dist = camera.position.distanceTo(tmp.set(...anchor));
-        ho.group.scale.setScalar(dist * 0.012);
+        ho.group.scale.setScalar(dist * perPixel);
+        faceCamera(ho, camera);
       }
       // HTML overlay follows its anchor.
       const ov = latest.current.overlay;
@@ -450,6 +551,8 @@ export function Viewport(props: Props) {
       }
     } else s.box = null;
     s.hoveredFace = s.hoveredEdge = null;
+    s.regions = [];
+    s.hoveredRegion = null;
 
     if (mesh) {
       const g = new THREE.BufferGeometry();
@@ -468,6 +571,22 @@ export function Viewport(props: Props) {
 
     for (const sk of sketches) {
       if (sk.id === props.hiddenSketchId) continue;
+      // Pickable regions: filled polygons on the sketch plane.
+      const fr = sk.frame;
+      const toWorld = new THREE.Matrix4().makeBasis(new THREE.Vector3(...fr.x), new THREE.Vector3(...fr.y), new THREE.Vector3(...fr.n)).setPosition(...fr.origin);
+      for (const r of sk.regions ?? []) {
+        const key = regionKey(sk.id, r.id);
+        if (!props.pickableRegions?.has(key)) continue;
+        const path = (a: Float32Array) => Array.from({ length: a.length / 2 }, (_, i) => new THREE.Vector2(a[i * 2], a[i * 2 + 1]));
+        const shape = new THREE.Shape(path(r.outer));
+        for (const h of r.holes) shape.holes.push(new THREE.Path(path(h)));
+        const geom = new THREE.ShapeGeometry(shape, 1);
+        geom.applyMatrix4(toWorld);
+        const regionMesh = new THREE.Mesh(geom, REGION);
+        regionMesh.renderOrder = 2;
+        s.model.add(regionMesh);
+        s.regions.push({ mesh: regionMesh, key, sketch: sk.id, id: r.id });
+      }
       const lg = new THREE.BufferGeometry();
       lg.setAttribute("position", new THREE.BufferAttribute(sk.segments, 3));
       s.model.add(new THREE.LineSegments(lg, sk.id === selectedSketchId ? SKETCH_SEL : SKETCH));
@@ -475,7 +594,45 @@ export function Viewport(props: Props) {
     rebuildOverlay(s, selectedEdges);
     // selectedEdges handled by its own effect
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mesh, sketches, selectedSketchId, props.hiddenSketchId]);
+    applyRegionMaterials(s);
+  }, [mesh, sketches, selectedSketchId, props.hiddenSketchId, props.pickableRegions]);
+
+  useEffect(() => {
+    const s = state.current;
+    if (!s) return;
+    s.hiddenFaces = new Set(props.hiddenFaces ?? []);
+    applyFaceMaterials(s);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [(props.hiddenFaces ?? []).join("|")]);
+
+  // Revolve axis candidates.
+  const axisKey = (props.axisCandidates ?? []).map((c) => c.id + c.a.join(",") + c.b.join(",")).join(";");
+  useEffect(() => {
+    const s = state.current;
+    if (!s) return;
+    clearGroup(s.axisGroup);
+    s.axes = [];
+    s.hoveredAxis = null;
+    for (const c of props.axisCandidates ?? []) {
+      const geo = new LineSegmentsGeometry();
+      geo.setPositions([...c.a, ...c.b]);
+      const line = new LineSegments2(geo, c.world ? AXIS_WORLD : AXIS);
+      if (c.world) line.computeLineDistances();
+      line.renderOrder = 12;
+      s.axisGroup.add(line);
+      s.axes.push({ line, id: c.id, world: c.world });
+    }
+    s.renderer.domElement.style.cursor = "";
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [axisKey]);
+
+  useEffect(() => {
+    const s = state.current;
+    if (!s) return;
+    s.selectedRegions = new Set(props.selectedRegions ?? []);
+    applyRegionMaterials(s);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.selectedRegions?.join(",")]);
 
   // The model turns translucent while sketching, so the sketch reads on top of it.
   const sketching = !!props.sketchCamera;
@@ -556,6 +713,40 @@ export function Viewport(props: Props) {
     }
   }, [ghost]);
 
+  useEffect(() => {
+    const s = state.current;
+    if (!s) return;
+    if (s.sweep) {
+      s.scene.remove(s.sweep);
+      s.sweep.traverse((o) => o instanceof THREE.Mesh && o.geometry.dispose());
+      s.sweep = null;
+    }
+    const sw = props.sweep;
+    if (sw && sw.positions.length) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(sw.positions, 3));
+      if (sw.fillet) {
+        // A fillet lies inside the corner it rounds: draw it over the solid, shaded so the
+        // curvature reads, with the bands it takes off the two faces underneath.
+        g.setAttribute("normal", new THREE.BufferAttribute(sw.fillet.normals, 3));
+        const group = new THREE.Group();
+        const bands = new THREE.BufferGeometry();
+        bands.setAttribute("position", new THREE.BufferAttribute(sw.fillet.bands, 3));
+        const bandMesh = new THREE.Mesh(bands, FILLET_BAND);
+        bandMesh.renderOrder = 6;
+        const arcMesh = new THREE.Mesh(g, FILLET_ARC);
+        arcMesh.renderOrder = 7;
+        group.add(bandMesh, arcMesh);
+        s.sweep = group;
+      } else {
+        const mesh = new THREE.Mesh(g, sw.cut ? GHOST_CUT : GHOST_ADD);
+        mesh.renderOrder = 5;
+        s.sweep = mesh;
+      }
+      s.scene.add(s.sweep);
+    }
+  }, [props.sweep]);
+
   return (
     <div className="viewport-wrap">
       <div ref={host} className={`viewport${props.edgesOnly ? " picking" : ""}`} />
@@ -567,6 +758,14 @@ export function Viewport(props: Props) {
   );
 }
 
+function styleAxes(s: SceneState) {
+  for (const a of s.axes) a.line.material = a.id === s.hoveredAxis ? AXIS_HOVER : a.world ? AXIS_WORLD : AXIS;
+}
+
+function applyRegionMaterials(s: SceneState) {
+  for (const r of s.regions) r.mesh.material = s.selectedRegions.has(r.key) ? REGION_SEL : r.key === s.hoveredRegion ? REGION_HOVER : REGION;
+}
+
 function applyFaceMaterials(s: SceneState) {
   if (!s.body || !s.mesh) return;
   const g = s.body.geometry;
@@ -574,7 +773,7 @@ function applyFaceMaterials(s: SceneState) {
   s.mesh.faceGroups.forEach((fg, i) => {
     const m = s.mesh!;
     const idx =
-      s.hiddenBody && m.faceBody[i] === s.hiddenBody ? 4 : i === s.hoveredFace ? 1 : s.selectedFaces.has(m.faceNames[i]) ? 2 : s.selectedBody && m.faceBody[i] === s.selectedBody ? 3 : 0;
+      (s.hiddenBody && m.faceBody[i] === s.hiddenBody) || s.hiddenFaces.has(m.faceNames[i]) ? 4 : i === s.hoveredFace ? 1 : s.selectedFaces.has(m.faceNames[i]) ? 2 : s.selectedBody && m.faceBody[i] === s.selectedBody ? 3 : 0;
     g.addGroup(fg.start, fg.count, idx);
   });
 }
@@ -614,55 +813,155 @@ function buildHandles(s: SceneState, handles: Handle[]) {
     handles.forEach((h, i) => {
       const ho = s.handleObjects[i];
       ho.group.position.set(...(h.kind === "arrow" ? h.origin : h.center));
-      if (h.kind === "arrow") ho.group.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(...h.dir).normalize());
-      if (h.color !== ho.handle.color) ho.group.traverse((o) => o instanceof THREE.Mesh && (o.material as THREE.MeshBasicMaterial).visible && (o.material as THREE.MeshBasicMaterial).color.set(h.color));
+      if (h.kind === "ring" && ho.spin) ho.spin.rotation.z = ((h.turn ?? 0) * Math.PI) / 180;
+      // Outside a drag the ring may have moved round (e.g. a revolve's end after its angle changed).
+      if (h.kind === "ring" && !s.dragging) orientRing(ho.group, h);
       // During a drag keep the original geometry: the drag measures from it.
       ho.handle = s.dragging ? { ...ho.handle, color: h.color } : h;
     });
+    styleHandles(s);
     return;
   }
   clearGroup(s.gizmos);
+  for (const m of HANDLE_LINES) m.dispose();
+  HANDLE_LINES.length = 0;
   s.handleObjects = [];
   for (const h of handles) {
     const group = new THREE.Group();
-    const color = new THREE.MeshBasicMaterial({ color: h.color, depthTest: false, transparent: true, opacity: 0.95 });
+    // Flat look: white fill with a dark outline (the body gizmo keeps its axis color on the outline).
+    const fill = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true, side: THREE.DoubleSide });
+    const ink = h.id.startsWith("move-") || h.id === "rotate" ? h.color : INK;
+    const flatFill = (geo: THREE.BufferGeometry) => {
+      const m = new THREE.Mesh(geo, fill);
+      m.userData.role = "fill";
+      return m;
+    };
     let collider: THREE.Object3D;
+    let knob: THREE.Object3D | undefined;
+    let spin: THREE.Object3D | undefined;
+    // Sizes in screen pixels (see the render loop).
     if (h.kind === "arrow") {
       group.position.set(...h.origin);
-      group.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(...h.dir).normalize());
-      const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 7, 12), color);
-      shaft.position.y = 3.5;
-      const tip = new THREE.Mesh(new THREE.ConeGeometry(1.4, 3.2, 20), color);
-      tip.position.y = 8.6;
-      const ball = new THREE.Mesh(new THREE.SphereGeometry(0.9, 16, 12), color);
-      // Generous invisible collider so the handle is easy to grab.
-      collider = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.2, 11, 8), new THREE.MeshBasicMaterial({ visible: false }));
-      collider.position.y = 5;
-      group.add(shaft, tip, ball, collider);
+      // One outline for shaft and head; the arrow lies in its local XY plane, +Y along `dir`.
+      const pts: [number, number][] = [[-3, 9], [3, 9], [3, 54], [9.5, 54], [0, 74], [-9.5, 54], [-3, 54]];
+      const shape = new THREE.Shape(pts.map(([x, y]) => new THREE.Vector2(x, y)));
+      group.add(flatFill(new THREE.ShapeGeometry(shape)), outline(pts, true, ink));
+      // Base dot.
+      group.add(flatFill(new THREE.CircleGeometry(6, 24)), outline(circlePts(6, 0, Math.PI * 2, 24), true, ink));
+      // Invisible collider about 18 px wide, so the handle is easy to grab.
+      collider = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, 80, 8), new THREE.MeshBasicMaterial({ visible: false }));
+      collider.position.y = 36;
+      group.add(collider);
     } else {
       group.position.set(...h.center);
-      group.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(...h.axis).normalize());
-      const ring = new THREE.Mesh(new THREE.TorusGeometry(11, 0.35, 8, 64), color);
-      const knob = new THREE.Mesh(new THREE.SphereGeometry(1.1, 16, 12), color);
-      knob.position.x = 11;
-      collider = new THREE.Mesh(new THREE.TorusGeometry(11, 2, 6, 48), new THREE.MeshBasicMaterial({ visible: false }));
-      group.add(ring, knob, collider);
+      orientRing(group, h);
+      const arc = ((h.arc ?? 360) * Math.PI) / 180;
+      const a0 = h.arc ? -arc / 2 : 0;
+      const R0 = 49, R1 = 55;
+      // Everything turns together about the axis while dragging (see `turn`).
+      const sp = new THREE.Group();
+      sp.rotation.z = ((h.turn ?? 0) * Math.PI) / 180;
+      group.add(sp);
+      spin = sp;
+      // A flat band in the ring's plane, edged on both sides (and at the ends of a partial ring).
+      sp.add(flatFill(new THREE.RingGeometry(R0, R1, 96, 1, a0, arc)));
+      const steps = Math.max(8, Math.round((96 * arc) / (Math.PI * 2)));
+      sp.add(outline(circlePts(R0, a0, arc, steps), !h.arc, ink), outline(circlePts(R1, a0, arc, steps), !h.arc, ink));
+      if (h.arc) {
+        for (const t of [a0, a0 + arc]) sp.add(outline([[R0 * Math.cos(t), R0 * Math.sin(t)], [R1 * Math.cos(t), R1 * Math.sin(t)]], false, ink));
+      }
+      // The knob, facing the camera.
+      const k = new THREE.Group();
+      k.position.x = (R0 + R1) / 2;
+      k.add(flatFill(new THREE.CircleGeometry(8, 24)), outline(circlePts(8, 0, Math.PI * 2, 24), true, ink));
+      sp.add(k);
+      knob = k;
+      collider = new THREE.Mesh(new THREE.TorusGeometry((R0 + R1) / 2, 10, 6, 48, arc), new THREE.MeshBasicMaterial({ visible: false }));
+      collider.rotation.z = a0;
+      sp.add(collider);
     }
-    group.traverse((o) => (o.renderOrder = 20));
+    group.traverse((o) => (o.renderOrder = o.userData.role === "outline" ? 21 : 20));
     s.gizmos.add(group);
-    s.handleObjects.push({ handle: h, group, collider });
+    s.handleObjects.push({ handle: h, group, collider, knob, spin });
   }
   styleHandles(s);
 }
 
 function styleHandles(s: SceneState) {
+  // With several handles (the body gizmo) the ones not under the cursor are dimmed.
+  const several = s.handleObjects.length > 1;
   for (const ho of s.handleObjects) {
     const hovered = ho.handle.id === s.hoveredHandle;
+    const opacity = several && !hovered && !s.dragging ? 0.55 : 1;
     ho.group.traverse((o) => {
-      if (o instanceof THREE.Mesh && (o.material as THREE.MeshBasicMaterial).visible) {
-        (o.material as THREE.MeshBasicMaterial).color.set(hovered ? 0xffc53d : ho.handle.color);
+      if (o.userData.role === "fill") {
+        const m = (o as THREE.Mesh).material as THREE.MeshBasicMaterial;
+        m.color.set(hovered ? HANDLE_HOVER : 0xffffff);
+        m.opacity = opacity;
+      } else if (o.userData.role === "outline") {
+        ((o as LineSegments2).material as LineMaterial).opacity = opacity;
       }
     });
+  }
+}
+
+const INK = 0x1d2633;
+const HANDLE_HOVER = 0xffe08a;
+/** Outline materials of the current handles: their resolution follows the viewport size. */
+const HANDLE_LINES: LineMaterial[] = [];
+const HANDLE_RES = new THREE.Vector2(1, 1);
+
+/** A 1.75 px outline through 2D points (in the handle's local plane). */
+function outline(pts: [number, number][], closed: boolean, color: number): LineSegments2 {
+  const pos: number[] = [];
+  for (let i = 0; i + 1 < pts.length + (closed ? 1 : 0); i++) {
+    const p = pts[i], q = pts[(i + 1) % pts.length];
+    pos.push(p[0], p[1], 0, q[0], q[1], 0);
+  }
+  const geo = new LineSegmentsGeometry();
+  geo.setPositions(pos);
+  const mat = new LineMaterial({ color, linewidth: 1.75, worldUnits: false, depthTest: false, transparent: true });
+  mat.resolution.copy(HANDLE_RES);
+  HANDLE_LINES.push(mat);
+  const line = new LineSegments2(geo, mat);
+  line.userData.role = "outline";
+  return line;
+}
+
+function circlePts(r: number, a0: number, arc: number, steps: number): [number, number][] {
+  return Array.from({ length: steps + 1 }, (_, i) => {
+    const t = a0 + (arc * i) / steps;
+    return [r * Math.cos(t), r * Math.sin(t)] as [number, number];
+  }).slice(0, arc >= Math.PI * 2 - 1e-9 ? steps : steps + 1);
+}
+
+/** Ring plane perpendicular to its axis, turned so the knob points at `toward`. */
+function orientRing(group: THREE.Object3D, h: Extract<Handle, { kind: "ring" }>) {
+  const axis = new THREE.Vector3(...h.axis).normalize();
+  group.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), axis);
+  if (!h.toward) return;
+  const want = new THREE.Vector3(...h.toward).projectOnPlane(axis);
+  const have = new THREE.Vector3(1, 0, 0).applyQuaternion(group.quaternion);
+  if (want.lengthSq() < 1e-12) return;
+  const ang = Math.atan2(have.clone().cross(want).dot(axis), have.dot(want.normalize()));
+  group.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(axis, ang));
+}
+
+/** Arrows turn about their direction to face the camera; ring knobs face it fully. */
+function faceCamera(ho: HandleObject, camera: THREE.Camera) {
+  if (ho.handle.kind === "arrow") {
+    const y = new THREE.Vector3(...ho.handle.dir).normalize();
+    const toCam = camera.position.clone().sub(ho.group.position).normalize();
+    let x = new THREE.Vector3().crossVectors(y, toCam);
+    if (x.lengthSq() < 1e-8) x = new THREE.Vector3().crossVectors(y, Math.abs(y.z) < 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0));
+    x.normalize();
+    const z = new THREE.Vector3().crossVectors(x, y);
+    ho.group.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+  } else if (ho.knob) {
+    // The knob's parent is the turning part of the ring.
+    const parent = ho.group.quaternion.clone();
+    if (ho.spin) parent.multiply(ho.spin.quaternion);
+    ho.knob.quaternion.copy(parent.invert().multiply(camera.quaternion));
   }
 }
 
@@ -750,7 +1049,7 @@ const VIEWS: [ViewName, string, string][] = [
 ];
 const MODE_LABEL: Record<NavMode, string> = { auto: "Auto", mouse: "Mouse", trackpad: "Trackpad" };
 const MODE_HINT: Record<NavMode, string> = {
-  auto: "Detects mouse or trackpad from the scroll gesture",
+  auto: "Wheel zooms; sideways two-finger scrolls orbit (trackpad), pinch zooms",
   mouse: "Wheel zooms",
   trackpad: "Two fingers orbit, shift + two fingers pan, pinch zooms",
 };

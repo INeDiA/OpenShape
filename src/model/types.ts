@@ -38,6 +38,8 @@ export type BodyId = string;
 export interface ExtrudeFeature extends FeatureBase {
   type: "extrude";
   sketchId: string;
+  /** Region ids of the sketch to use (see sketchRegions); all closed regions when absent. */
+  regions?: string[];
   distance: number;
   op: BooleanOp;
   target?: BodyId;
@@ -46,8 +48,12 @@ export interface ExtrudeFeature extends FeatureBase {
 export interface RevolveFeature extends FeatureBase {
   type: "revolve";
   sketchId: string;
-  /** Axis in the sketch plane's global frame. */
+  /** Region ids of the sketch to use; all closed regions when absent. */
+  regions?: string[];
+  /** World axis through the origin, used when `axisLine` isn't set. */
   axis: "X" | "Y" | "Z";
+  /** A line of the sketch to revolve around (overrides `axis`). */
+  axisLine?: string;
   angle: number;
   op: BooleanOp;
   target?: BodyId;
@@ -60,6 +66,17 @@ export interface EdgeTreatmentFeature extends FeatureBase {
   edges: string[];
   /** Per-edge sizes overriding `size`, keyed by persistent edge name. */
   overrides?: Record<string, number>;
+}
+
+/**
+ * Concave rounding of edges (a "cove"): removes a cylinder of radius `size`
+ * centred on each edge, leaving a quarter-round groove.
+ */
+export interface CoveFeature extends FeatureBase {
+  type: "cove";
+  size: number;
+  /** Persistent edge names (at least one). */
+  edges: string[];
 }
 
 /** Moves a planar face along its normal: positive adds material, negative removes it. */
@@ -128,6 +145,7 @@ export type Feature =
   | ExtrudeFeature
   | RevolveFeature
   | EdgeTreatmentFeature
+  | CoveFeature
   | PushPullFeature
   | ShellFeature
   | MirrorFeature
@@ -185,14 +203,41 @@ export interface SketchPreview {
   reference?: Float32Array;
   /** The sketch plane in world space (where the sketch's local coordinates live). */
   frame: Frame;
+  /** Pickable regions, as polygons in sketch coordinates (flat x, y pairs). */
+  regions: RegionPreview[];
+}
+
+export interface RegionPreview {
+  id: string;
+  outer: Float32Array;
+  holes: Float32Array[];
+  /** A point inside the region (not in a hole), in sketch coordinates. */
+  inside: [number, number];
+}
+
+/** What to measure: named faces and edges of the final model, or one body. */
+export interface MeasureSelection {
+  faces: string[];
+  edges: string[];
+  body: BodyId | null;
+}
+
+/** One line of a measurement: a number with a unit, or preformatted text. */
+export type MeasureRow = { label: string; value: number; unit: "mm" | "mm²" | "mm³" | "°" } | { label: string; text: string };
+
+export interface Measurement {
+  title: string;
+  rows: MeasureRow[];
 }
 
 export type KernelRequest =
   | { kind: "evaluate"; seq: number; doc: Document; stopBefore?: string; preview?: boolean }
+  | { kind: "measure"; seq: number; doc: Document; selection: MeasureSelection }
   | { kind: "export"; seq: number; doc: Document; format: "step" | "mesh" };
 
 export type KernelResponse =
-  | { kind: "ready" }
+  /** `threads`: OCCT worker threads available to Booleans (1 = single-threaded build). */
+  | { kind: "ready"; threads?: number }
   | { kind: "init-error"; error: string }
   | {
       kind: "evaluated";
@@ -203,4 +248,5 @@ export type KernelResponse =
       status: FeatureStatus[];
       ms: number;
     }
+  | { kind: "measured"; seq: number; measurement?: Measurement; error?: string }
   | { kind: "exported"; seq: number; blob?: Blob; mesh?: { vertices: Float32Array; triangles: Uint32Array }; error?: string };

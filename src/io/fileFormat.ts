@@ -128,6 +128,10 @@ export function validateDocument(raw: unknown): Document {
         need(Array.isArray(f.edges) && f.edges.every((e) => typeof e === "string"), `${at}.edges must be a list of names`);
         if (f.overrides !== undefined) need(isObj(f.overrides) && Object.values(f.overrides).every((x) => typeof x === "number"), `${at}.overrides must map edge names to numbers`);
         break;
+      case "cove":
+        num(f.size, `${at}.size`);
+        need(Array.isArray(f.edges) && f.edges.length > 0 && f.edges.every((e) => typeof e === "string"), `${at}.edges must list at least one edge name`);
+        break;
       case "pushpull":
         str(f.face, `${at}.face`);
         num(f.distance, `${at}.distance`);

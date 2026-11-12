@@ -1,6 +1,6 @@
 import type { BooleanOp, Feature, FeatureStatus, PlaneName, SketchFeature } from "../model/types";
 import type { Scope } from "../expr/expr";
-import { isDimension } from "../sketch/model";
+import { isDimension, sketchLines } from "../sketch/model";
 import { ExprInput } from "./ExprInput";
 import { findLoops } from "../sketch/profiles";
 import { useEffect, useState } from "react";
@@ -140,9 +140,14 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
             <>
               <Select
                 label="Axis"
-                value={f.axis}
-                options={[["X", "X"], ["Y", "Y"], ["Z", "Z"]]}
-                onChange={(axis) => onChange({ axis })}
+                value={f.axisLine ?? f.axis}
+                options={[
+                  ...sketchLines(sketches.find((s) => s.id === f.sketchId)?.sketch ?? { entities: [], constraints: [] }).map((l) => [l.id, l.label] as [string, string]),
+                  ["X", "World X"],
+                  ["Y", "World Y"],
+                  ["Z", "World Z"],
+                ]}
+                onChange={(v) => onChange(v === "X" || v === "Y" || v === "Z" ? { axis: v, axisLine: undefined } : { axisLine: v })}
               />
               <Field label="Angle °" feature={f} field="angle" scope={scope} min={0.01} onChange={onChange} />
             </>
@@ -197,6 +202,18 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
           </p>
           <Select label="Operation" value={f.op} options={OPS} onChange={(op) => onChange({ op })} />
           <p className="muted">The file is embedded in the document.</p>
+        </>
+      )}
+
+      {f.type === "cove" && (
+        <>
+          <Field label="Radius" feature={f} field="size" scope={scope} min={0.001} onChange={onChange} />
+          <div className="edge-pick">
+            <p>
+              <strong>{f.edges.length} edge{f.edges.length === 1 ? "" : "s"} selected</strong>
+            </p>
+            <p className="muted">A quarter-round groove centred on each edge. Click edges in the viewport to add or remove them.</p>
+          </div>
         </>
       )}
 

@@ -31,11 +31,13 @@ import {
   type FaceNames,
   type NamedShape,
 } from "./naming";
-import type { BodyId, BooleanOp, Document, Feature, FeatureStatus, MeshData, SketchFeature, SketchPreview } from "../model/types";
+import type { BodyId, BooleanOp, Document, Feature, FeatureStatus, MeshData, RegionPreview, SketchFeature, SketchPreview } from "../model/types";
 import { frameToLocal, frameToWorld, planeFrame, standardFrame, type Frame, type Vec3 } from "../model/frame";
 import { entityMap, pointOf } from "../sketch/model";
 import { curvePolyline } from "../sketch/curves";
-import { arcMidpoint, findLoops, loopPolygon, nestLoops, type Loop } from "../sketch/profiles";
+import { commonShapes, cutShapes, fuseShapes } from "./booleans";
+import { coveTool } from "./cove";
+import { arcMidpoint, findLoops, loopPolygon, nestLoops, regionInteriorPoint, sketchRegions, type Loop } from "../sketch/profiles";
 import { parseSTL } from "../io/stl";
 import { stretchFace } from "./stretch";
 import { treatEdges } from "./edgeTreatment";
@@ -69,8 +71,23 @@ function loopDrawing(l: Loop): Drawing {
   return pen.close();
 }
 
-/** Builds the sketch region: outer loops add material, nested loops become holes. */
-function sketchDrawing(f: SketchFeature): Drawing {
+/**
+ * Builds the sketch region: outer loops add material, nested loops become
+ * holes. With `regions`, only those regions (each minus the loops inside it).
+ */
+function sketchDrawing(f: SketchFeature, regions?: string[]): Drawing {
+  if (regions?.length) {
+    const all = sketchRegions(f.sketch);
+    let result: Drawing | null = null;
+    for (const id of regions) {
+      const r = all.find((x) => x.id === id);
+      if (!r) throw new Error(`A selected region of ${f.name} no longer exists: pick the regions again`);
+      let d = loopDrawing(r.loop);
+      for (const h of r.holes) d = d.cut(loopDrawing(h));
+      result = result ? result.fuse(d) : d;
+    }
+    return result!;
+  }
   const { loops } = findLoops(f.sketch);
   if (loops.length === 0) throw new Error("Sketch has no closed profile");
   let result: Drawing | null = null;
@@ -80,6 +97,16 @@ function sketchDrawing(f: SketchFeature): Drawing {
     else result = depth % 2 === 0 ? result.fuse(d) : result.cut(d);
   }
   return result!;
+}
+
+/** Region outlines for picking in the viewport. */
+function regionPreviews(f: SketchFeature): RegionPreview[] {
+  const flat = (l: Loop) => new Float32Array(loopPolygon(l, 24).flat());
+  try {
+    return sketchRegions(f.sketch).map((r) => ({ id: r.id, outer: flat(r.loop), holes: r.holes.map(flat), inside: regionInteriorPoint(r) }));
+  } catch {
+    return [];
+  }
 }
 
 const replicadPlane = (fr: Frame) => new Plane(fr.origin, fr.x, fr.n);
@@ -143,8 +170,9 @@ function faceReference(face: Face, fr: Frame): Float32Array {
 
 // ---- solids --------------------------------------------------------------------------
 
-function booleanOp(body: NamedShape, tool: NamedShape, op: Exclude<BooleanOp, "new">, featureId: string): NamedShape {
-  const shape = op === "join" ? body.shape.fuse(tool.shape) : op === "cut" ? body.shape.cut(tool.shape) : body.shape.intersect(tool.shape);
+/** `touching`: the tool meets the body only along shared faces (OCCT's faster glue mode applies). */
+function booleanOp(body: NamedShape, tool: NamedShape, op: Exclude<BooleanOp, "new">, featureId: string, touching = false): NamedShape {
+  const shape = op === "join" ? fuseShapes(body.shape, [tool.shape], { glue: touching }) : op === "cut" ? cutShapes(body.shape, [tool.shape], { glue: touching }) : commonShapes(body.shape, [tool.shape]);
   return { shape, names: transferNames(shape, [body, tool], () => `${featureId}:new`) };
 }
 
@@ -174,7 +202,7 @@ function joinCopies(body: NamedShape, copies: Shape3D[], featureId: string): Nam
   let result = body;
   copies.forEach((copy, i) => {
     const named = { shape: copy, names: copyNames(body, copy, `${featureId}:copy${i + 1}`) };
-    const shape = result.shape.fuse(copy);
+    const shape = fuseShapes(result.shape, [copy]);
     result = { shape, names: transferNames(shape, [result, named], () => `${featureId}:new`) };
   });
   return result;
@@ -368,11 +396,11 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
         const owner = bodies.withFace(f.face);
         const { face, frame } = planarFaceFrame(owner.shape, f.face, f.offset);
         sketches.set(f.id, { feature: f, frame });
-        previews.push({ id: f.id, segments: sketchSegments(f, frame), reference: faceReference(face, frame), frame });
+        previews.push({ id: f.id, segments: sketchSegments(f, frame), reference: faceReference(face, frame), frame, regions: regionPreviews(f) });
       } else {
         const frame = standardFrame(f.plane, f.offset);
         sketches.set(f.id, { feature: f, frame });
-        previews.push({ id: f.id, segments: sketchSegments(f, frame), frame });
+        previews.push({ id: f.id, segments: sketchSegments(f, frame), frame, regions: regionPreviews(f) });
       }
       return;
     }
@@ -380,14 +408,25 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
     case "extrude": {
       const { feature: s, frame } = sketchOf(f.sketchId);
       if (f.distance === 0) throw new Error("Distance cannot be 0");
-      const shape = sketchDrawing(s).sketchOnPlane(replicadPlane(frame)).extrude(f.distance) as Shape3D;
+      const shape = sketchDrawing(s, f.regions).sketchOnPlane(replicadPlane(frame)).extrude(f.distance) as Shape3D;
       bodies.add(f.id, { shape, names: nameExtrusion(shape, f.id, s, frame, f.distance) }, f.op, f.target);
       return;
     }
 
     case "revolve": {
       const { feature: s, frame } = sketchOf(f.sketchId);
-      const shape = sketchDrawing(s).sketchOnPlane(replicadPlane(frame)).revolve(AXES[f.axis], { angle: f.angle }) as Shape3D;
+      let axis: Vec3 = AXES[f.axis], origin: Vec3 = [0, 0, 0];
+      if (f.axisLine) {
+        const m = entityMap(s.sketch);
+        const line = m.get(f.axisLine);
+        if (!line || line.kind !== "line") throw new Error(`The axis line of ${f.name} is no longer in ${s.name}`);
+        const a = pointOf(m, line.p1), b = pointOf(m, line.p2);
+        origin = frameToWorld(frame, a.x, a.y);
+        const end = frameToWorld(frame, b.x, b.y);
+        axis = [end[0] - origin[0], end[1] - origin[1], end[2] - origin[2]];
+        if (Math.hypot(...axis) < 1e-9) throw new Error("The axis line has no length");
+      }
+      const shape = sketchDrawing(s, f.regions).sketchOnPlane(replicadPlane(frame)).revolve(axis, { origin, angle: f.angle }) as Shape3D;
       bodies.add(f.id, { shape, names: nameRevolution(shape, f.id) }, f.op, f.target);
       return;
     }
@@ -430,6 +469,25 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
       return warning;
     }
 
+    case "cove": {
+      if (f.size <= 0) throw new Error("Radius must be > 0");
+      if (!f.edges.length) throw new Error("Select at least one edge");
+      const owner = f.edges.map((n) => bodies.withEdge(n)).find(Boolean) ?? null;
+      if (!owner) throw new Error(`None of the ${f.edges.length} selected edges exist anymore`);
+      const body = owner.shape;
+      const edges = nameEdges(body.shape, body.names);
+      const found = f.edges.filter((n) => edges.byName.has(n));
+      const warning = found.length < f.edges.length ? `${f.edges.length - found.length} of ${f.edges.length} selected edges no longer exist` : undefined;
+      // One cylinder (or torus segment) per edge, all subtracted in a single Boolean run.
+      const tools = found.map((n) => coveTool(edges.byName.get(n)!, f.size));
+      const shape = ensureValid(cutShapes(body.shape, tools), `Radius ${f.size} is too large for the selected edges`);
+      // New concave faces are named after the edge they replace.
+      const among = new Set(found);
+      const names = transferNames(shape, [body], (_face, sample) => `${f.id}:cove:${nearestEdgeName(sample.p, edges, among)}`);
+      bodies.set(owner.id, { shape, names });
+      return warning;
+    }
+
     case "pushpull": {
       if (f.distance === 0) throw new Error("Distance cannot be 0");
       const owner = bodies.withFace(f.face);
@@ -450,7 +508,8 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
       const faceEdges = new Set(face.edges.map((e) => edges.byHash.get(e.hashCode)!).filter(Boolean));
       const tool = basicFaceExtrusion(face, new Vector([normal[0] * f.distance, normal[1] * f.distance, normal[2] * f.distance])) as Shape3D;
       const named = { shape: tool, names: nameFaceExtrusion(tool, f.id, normal, point, f.distance, edges, faceEdges) };
-      bodies.set(owner.id, booleanOp(body, named, f.distance > 0 ? "join" : "cut", f.id));
+      // Pulling out, the extruded face only touches the body at that face.
+      bodies.set(owner.id, booleanOp(body, named, f.distance > 0 ? "join" : "cut", f.id, f.distance > 0));
       return;
     }
 

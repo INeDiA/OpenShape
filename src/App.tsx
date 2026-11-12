@@ -10,14 +10,13 @@ import {
   makeMirror,
   makePattern,
   makePushPull,
-  makeRevolve,
   makeShell,
   makeSketch,
   makeSketchOnFace,
   removeFeature,
   updateFeature,
 } from "./model/doc";
-import type { Document, Feature, FeatureStatus, MeshData, PlaneName, SketchFeature, SketchPreview } from "./model/types";
+import type { Document, Feature, FeatureStatus, Measurement, MeshData, PlaneName, SketchFeature, SketchPreview } from "./model/types";
 import { SketchEditor } from "./sketch/SketchEditor";
 import { loadSolver, solve, solverReady } from "./sketch/solver";
 import { resolveDocument, type SketchSolver } from "./model/resolve";
@@ -43,7 +42,8 @@ const solveSketch: SketchSolver = (s) => {
 import { HistoryPanel } from "./ui/HistoryPanel";
 import { moveFeature, removeFeatures } from "./model/history";
 import { PropertiesPanel } from "./ui/PropertiesPanel";
-import { Viewport, type HoverInfo } from "./viewport/Viewport";
+import { MeasurePanel } from "./ui/MeasurePanel";
+import { regionKey, Viewport, type HoverInfo } from "./viewport/Viewport";
 
 type KernelState = "loading" | "ready" | "error";
 
@@ -83,6 +83,7 @@ export function App() {
   const kernel = useRef<KernelClient | null>(null);
   const [kernelState, setKernelState] = useState<KernelState>("loading");
   const [kernelError, setKernelError] = useState("");
+  const [kernelThreads, setKernelThreads] = useState(1);
   const [boot] = useState(() => loadAutosave());
   const { doc, past, future, commit: rawCommit, update: rawUpdate, replace, undo, redo, canUndo, canRedo } = useDocument(() => {
     if (!boot) return { doc: demoDocument() };
@@ -111,11 +112,31 @@ export function App() {
   const [status, setStatus] = useState<Map<string, FeatureStatus>>(new Map());
   const [evalMs, setEvalMs] = useState<number | null>(null);
   const [hover, setHover] = useState<HoverInfo | null>(null);
+  // Kernel busy, and how long the visible "computing" indicator has been up (shown after a short delay).
+  const [computing, setComputing] = useState(false);
+  const [computingFor, setComputingFor] = useState<number | null>(null);
+  useEffect(() => {
+    if (!computing) {
+      setComputingFor(null);
+      return;
+    }
+    const start = performance.now();
+    const show = setTimeout(() => setComputingFor(0), 300);
+    const tick = setInterval(() => setComputingFor((v) => (v === null ? v : Math.floor((performance.now() - start) / 1000))), 500);
+    return () => {
+      clearTimeout(show);
+      clearInterval(tick);
+    };
+  }, [computing]);
 
   useEffect(() => {
     const k = new KernelClient();
     kernel.current = k;
-    k.onReady = () => setKernelState("ready");
+    k.onReady = (threads) => {
+      setKernelThreads(threads);
+      setKernelState("ready");
+    };
+    k.onBusy = setComputing;
     k.onInitError = (e) => {
       setKernelState("error");
       setKernelError(e);
@@ -131,9 +152,10 @@ export function App() {
   // Editing a feature that references topology shows the model *before* it,
   // so its edges/faces can be picked: fillet/chamfer (edges), shell and push/pull (faces).
   const selectedFeature = doc.features.find((f) => f.id === selectedId) ?? null;
-  const pickingFeature = !editingSketchId && (selectedFeature?.type === "fillet" || selectedFeature?.type === "chamfer") ? selectedFeature : null;
+  const pickingFeature = !editingSketchId && (selectedFeature?.type === "fillet" || selectedFeature?.type === "chamfer" || selectedFeature?.type === "cove") ? selectedFeature : null;
   const faceFeature = !editingSketchId && (selectedFeature?.type === "shell" || selectedFeature?.type === "pushpull") ? selectedFeature : null;
   const rollbackId = pickingFeature?.id ?? faceFeature?.id;
+
 
   const manip = useManipulation({
     doc,
@@ -148,13 +170,61 @@ export function App() {
       startSketchEdit(f.id);
     },
     onAddFeature: (f) => add(f),
+    sketches: sketchPreviews,
     bodyName: (id) => doc.features.find((f) => f.id === id)?.name ?? "Body",
   });
 
   // While a handle is dragged the kernel previews the document with the change applied.
-  const kernelDoc = manip.previewDoc ?? doc;
+  // Measurements of the model selection (faces, edges or a body), computed by the kernel.
+  const [measurement, setMeasurement] = useState<Measurement | null>(null);
+  const [measuring, setMeasuring] = useState(false);
+  const sel = manip.selection;
+  const measureKey = !editingSketchId && !rollbackId && !manip.dragging && (sel.faces.length || sel.edges.length || sel.body) ? JSON.stringify(sel) : null;
   useEffect(() => {
-    kernel.current?.evaluate(kernelDoc, rollbackId, !!manip.previewDoc);
+    if (!measureKey || kernelState !== "ready") {
+      setMeasurement(null);
+      return;
+    }
+    let alive = true;
+    setMeasuring(true);
+    const t = setTimeout(() => {
+      kernel.current
+        ?.measure(doc, JSON.parse(measureKey))
+        .then((m) => alive && setMeasurement(m))
+        .catch(() => alive && setMeasurement(null))
+        .finally(() => alive && setMeasuring(false));
+    }, 120);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [measureKey, doc, kernelState]);
+
+  // Sketch regions that can still be clicked: those no extrude/revolve uses yet
+  // (one that uses a whole sketch takes all of it). None while editing something.
+  const pickableRegions = useMemo(() => {
+    const out = new Set<string>();
+    if (editingSketchId || pickingFeature || faceFeature) return out;
+    for (const sk of sketchPreviews) {
+      const users = doc.features.filter((f) => (f.type === "extrude" || f.type === "revolve") && f.sketchId === sk.id && !f.suppressed) as { regions?: string[] }[];
+      if (users.some((f) => !f.regions?.length)) continue;
+      const used = new Set(users.flatMap((f) => f.regions ?? []));
+      for (const r of sk.regions) if (!used.has(r.id)) out.add(regionKey(sk.id, r.id));
+    }
+    return out;
+  }, [sketchPreviews, doc, editingSketchId, pickingFeature, faceFeature]);
+
+  // A revolve or extrude picked in the history gets its ring/arrow on the model.
+  useEffect(() => {
+    if (selectedFeature?.type === "revolve" || selectedFeature?.type === "extrude") manip.activate(selectedFeature.id);
+    else if (selectedId && manip.activeId && manip.activeId !== selectedId) manip.activate(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
+
+  const kernelDoc = doc;
+  useEffect(() => {
+    kernel.current?.evaluate(kernelDoc, rollbackId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kernelDoc, rollbackId]);
 
@@ -358,7 +428,7 @@ export function App() {
       const t = e.target as HTMLElement;
       if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable) return;
       const s = manip.selection;
-      if (editingSketchId || !selectedId || s.faces.length || s.edges.length || s.body) return;
+      if (editingSketchId || !selectedId || s.faces.length || s.edges.length || s.body || s.regions.length) return;
       e.preventDefault();
       deleteFeature(selectedId);
     };
@@ -368,7 +438,7 @@ export function App() {
 
 
   return (
-    <div className="app">
+    <div className={`app${kernelState === "ready" && computingFor !== null ? " computing" : ""}`}>
       <header className="toolbar">
         <strong className="brand">OpenShape</strong>
         <div className="group file-group">
@@ -399,7 +469,7 @@ export function App() {
           <button disabled={!baseSketch} onClick={() => add(makeExtrude(doc, baseSketch!.id, hasBody(doc) ? "join" : "new"))}>
             ⬆ Extrude
           </button>
-          <button disabled={!baseSketch} onClick={() => add(makeRevolve(doc, baseSketch!.id, hasBody(doc) ? "join" : "new"))}>
+          <button disabled={!baseSketch} onClick={() => (setSelectedId(null), manip.startRevolve(baseSketch!.id))} title="Revolve the sketch: pick the axis next">
             ↻ Revolve
           </button>
           <button disabled={!hasBody(doc)} onClick={() => add(makeEdgeTreatment(doc, "fillet"))}>◜ Fillet</button>
@@ -511,6 +581,15 @@ export function App() {
           selectedFaces={faceFeature?.type === "shell" ? faceFeature.faces : faceFeature?.type === "pushpull" ? [faceFeature.face] : liveFaces}
           selectedBody={manip.selection.body}
           onPickFace={onPickFace}
+          pickableRegions={pickableRegions}
+          axisCandidates={manip.axisCandidates}
+          onPickAxis={manip.pickAxis}
+          selectedRegions={manip.selection.regions.map((r) => regionKey(r.sketch, r.id))}
+          onPickRegion={(sketch, id, additive) => {
+            manip.pickRegion(sketch, id, additive);
+            if (selectedFeature) setSelectedId(null);
+          }}
+          onEditSketch={(id) => solverState === "ready" && startSketchEdit(id)}
           onPickBody={(id) => {
             if (faceFeature || pickingFeature) return;
             manip.pickBody(id);
@@ -522,9 +601,12 @@ export function App() {
           rigidPreview={manip.rigid}
           fitKey={fitKey}
           ghost={manip.ghost}
+          sweep={manip.sweep}
+          hiddenFaces={manip.hiddenFaces}
           sketchCamera={editingSketch && sketchView && editingFrame ? { frame: editingFrame, ...sketchView } : null}
           hiddenSketchId={editingSketch?.id ?? null}
         />
+        {measureKey && <MeasurePanel measurement={measurement} busy={measuring} />}
         {editingSketch && (
           <SketchEditor
             key={editingSketch.id}
@@ -549,7 +631,16 @@ export function App() {
             {faceFeature.type === "shell" ? "Click faces to open" : "Click the planar face to move"} · showing the model before <strong>{faceFeature.name}</strong>
           </div>
         )}
-        {kernelState === "loading" && <div className="overlay">Loading OpenCascade kernel…</div>}
+        {kernelState === "loading" && (
+          <div className="overlay busy-indicator" role="status">
+            <span className="spinner" aria-hidden="true" /> Loading the modeling kernel…
+          </div>
+        )}
+        {kernelState === "ready" && computingFor !== null && (
+          <div className="overlay busy-indicator" role="status" title="The solid is being rebuilt">
+            <span className="spinner" aria-hidden="true" /> Computing{computingFor >= 2 ? ` · ${computingFor} s` : "…"}
+          </div>
+        )}
         {kernelState === "error" && <div className="overlay error-msg">Kernel unavailable: {kernelError}</div>}
       </main>
 
@@ -564,7 +655,10 @@ export function App() {
       />
 
       <footer className="statusbar">
-        <span>Kernel: {kernelState}</span>
+        <span title={kernelThreads > 1 ? "Multi-threaded OpenCascade: Booleans run in parallel" : "Single-threaded OpenCascade (the page isn't cross-origin isolated)"}>
+          Kernel: {kernelState}
+          {kernelState === "ready" && (kernelThreads > 1 ? ` · ${kernelThreads} threads` : " · 1 thread")}
+        </span>
         <span>Solver: {solverState}</span>
         {evalMs != null && <span>Rebuild: {evalMs.toFixed(0)} ms</span>}
         <span className="topo-name" title="Persistent topological name">
