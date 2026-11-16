@@ -65,7 +65,7 @@ Funzioni non ancora coperte (ordine indicativo, le più utili prima):
 
 18. Booleane fra corpi esistenti: unione, sottrazione, intersezione come strumento a sé
 19. Project: proiettare spigoli e facce del modello nello sketch come geometria di riferimento
-20. Vista in sezione dal vivo con piano di taglio
+20. ~~Vista in sezione dal vivo~~: piano di taglio su X, Y o Z, lato invertibile, posizione col cursore, sezione piena colorata (tasto S)
 21. Piani di costruzione: sfalsati, inclinati, per tre punti, normali a uno spigolo
 22. Vincoli mancanti: concentricità, simmetria, distanza punto-linea e tra linee parallele, semiassi dell'ellisse, pattern lineari e circolari nello sketch
 23. Strumenti di sketch: raccordo degli angoli, asola (slot), testo, immagini di riferimento, scelta dell'asse di revolve cliccando una linea nella vista

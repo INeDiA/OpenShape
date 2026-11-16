@@ -7,6 +7,7 @@ import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeome
 import type { MeshData, SketchPreview } from "../model/types";
 import type { Vec3 } from "../model/frame";
 import { CameraNav, placeSketchCamera, type NavMode, type SketchCamera, type ViewName } from "./navigation";
+import { SectionView, sectionRange, type SectionAxis, type SectionSpec } from "./section";
 
 const NAV_MODE_KEY = "openshape.navMode";
 const readNavMode = (): NavMode => {
@@ -163,6 +164,9 @@ interface SceneState {
   axes: { line: LineSegments2; id: string; world: boolean }[];
   hoveredAxis: string | null;
   fitted: boolean;
+  /** Live section: clipping plane and cap. */
+  section: SectionView;
+  sectionSpec: SectionSpec | null;
 }
 
 export function Viewport(props: Props) {
@@ -176,8 +180,10 @@ export function Viewport(props: Props) {
   // One-time scene setup.
   useEffect(() => {
     const el = host.current!;
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    // Stencil buffer: the section cap is drawn through it.
+    const renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true });
     renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.localClippingEnabled = true;
     el.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
@@ -207,13 +213,18 @@ export function Viewport(props: Props) {
     const gizmos = new THREE.Group();
     const axisGroup = new THREE.Group();
     scene.add(model, overlayGroup, gizmos, axisGroup);
+    const section = new SectionView([BODY, HOVER, SELECTED, BODY_SELECTED, EDGE, EDGE_SELECTED, EDGE_HOVER, SKETCH, SKETCH_SEL]);
+    scene.add(section.group);
 
     const s: SceneState = {
       renderer, scene, camera, controls, model, overlay: overlayGroup, gizmos, handleObjects: [],
       body: null, edgeLines: null, mesh: null, hoveredFace: null, hoveredEdge: null, hoveredHandle: null,
       selectedFaces: new Set(), selectedBody: null, hiddenBody: null, hiddenFaces: new Set(), rigid: null, ghost: null, sweep: null, dragging: false, nav: null, box: null, fitted: false,
       regions: [], hoveredRegion: null, selectedRegions: new Set(), axisGroup, axes: [], hoveredAxis: null,
+      section, sectionSpec: null,
     };
+    /** First hit on the kept side of the section plane (the removed half isn't there). */
+    const kept = <T extends THREE.Intersection>(hits: T[]): T | undefined => hits.find((h) => section.keeps(h.point));
     state.current = s;
 
     // Navigation: zoom towards the model point under the cursor.
@@ -222,7 +233,7 @@ export function Viewport(props: Props) {
       if (!s.body) return null;
       const r = renderer.domElement.getBoundingClientRect();
       pickRay.setFromCamera(new THREE.Vector2(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1), camera);
-      return pickRay.intersectObject(s.body)[0]?.point ?? null;
+      return kept(pickRay.intersectObject(s.body))?.point ?? null;
     });
     nav.mode = readNavMode();
     s.nav = nav;
@@ -261,7 +272,7 @@ export function Viewport(props: Props) {
     /** Index into mesh.edgeGroups of the edge under the cursor, if it's in front of the body. */
     const pickEdge = (): number | null => {
       if (!s.edgeLines || !s.mesh) return null;
-      const bodyHit = s.body ? ray.intersectObject(s.body)[0] : undefined;
+      const bodyHit = s.body ? kept(ray.intersectObject(s.body)) : undefined;
       // Pixel tolerance measured where the cursor actually is (not at the orbit target),
       // and tighter over fillet faces so thin blends stay selectable.
       const r = renderer.domElement.getBoundingClientRect();
@@ -274,7 +285,7 @@ export function Viewport(props: Props) {
         if (fi >= 0 && /:blend:|:cove:/.test(s.mesh.faceNames[fi])) px = 2;
       }
       ray.params.Line = { threshold: (dist * Math.tan((camera.fov * Math.PI) / 360) * 2 * px) / r.height };
-      const hit = ray.intersectObject(s.edgeLines)[0];
+      const hit = kept(ray.intersectObject(s.edgeLines));
       if (!hit || hit.index == null) return null;
       if (bodyHit && bodyHit.distance < hit.distance - 0.5) return null; // occluded
       const i = s.mesh.edgeGroups.findIndex((g) => hit.index! >= g.start && hit.index! < g.start + g.count);
@@ -294,14 +305,14 @@ export function Viewport(props: Props) {
       if (!s.regions.length) return null;
       const hit = ray.intersectObjects(s.regions.map((r) => r.mesh), false)[0];
       if (!hit) return null;
-      const bodyHit = s.body ? ray.intersectObject(s.body)[0] : undefined;
+      const bodyHit = s.body ? kept(ray.intersectObject(s.body)) : undefined;
       if (bodyHit && bodyHit.distance < hit.distance - 0.05) return null;
       return s.regions.find((r) => r.mesh === hit.object) ?? null;
     };
 
     const pickFace = (): number | null => {
       if (!s.body || !s.mesh) return null;
-      const hit = ray.intersectObject(s.body)[0];
+      const hit = kept(ray.intersectObject(s.body));
       if (hit?.faceIndex == null) return null;
       const idx = hit.faceIndex * 3;
       const i = s.mesh.faceGroups.findIndex((g) => idx >= g.start && idx < g.start + g.count);
@@ -568,6 +579,7 @@ export function Viewport(props: Props) {
       s.edgeLines = new THREE.LineSegments(eg, EDGE);
       s.model.add(s.edgeLines);
     }
+    s.section.update(s.sectionSpec, s.body, s.box);
 
     for (const sk of sketches) {
       if (sk.id === props.hiddenSketchId) continue;
@@ -1056,6 +1068,20 @@ const MODE_HINT: Record<NavMode, string> = {
 
 function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
   const [mode, setMode] = useState<NavMode>(readNavMode);
+  // Section view: off, or the plane's axis, side and position.
+  const [section, setSection] = useState<SectionSpec | null>(null);
+  const applySection = (spec: SectionSpec | null) => {
+    setSection(spec);
+    const s = state.current;
+    if (!s) return;
+    s.sectionSpec = spec;
+    s.section.update(spec, s.body, s.box);
+  };
+  const centreOn = (axis: SectionAxis): SectionSpec => {
+    const [lo, hi] = sectionRange(state.current?.box ?? null, axis);
+    return { axis, flip: section?.flip ?? false, offset: Math.round(((lo + hi) / 2) * 10) / 10 };
+  };
+  const range = section ? sectionRange(state.current?.box ?? null, section.axis) : null;
   const fit = () => state.current?.nav?.fit(state.current.box);
   const view = (v: ViewName) => state.current?.nav?.view(v, state.current.box);
 
@@ -1074,6 +1100,7 @@ function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
       if (["INPUT", "SELECT", "TEXTAREA"].includes(el.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
       if (document.querySelector(".sketch-editor")) return; // the sketcher has its own keys
       if (e.key === "f" || e.key === "F") fit();
+      if (e.key === "s" || e.key === "S") applySection(section ? null : centreOn("X"));
       const v = VIEWS.find(([, , key]) => key === e.key);
       if (v) view(v[0]);
     };
@@ -1089,6 +1116,36 @@ function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
           {label}
         </button>
       ))}
+      <button
+        className={section ? "active" : ""}
+        onClick={() => applySection(section ? null : centreOn("X"))}
+        title="Section view: cut the model with a plane to see inside (S)"
+      >
+        ◩ Section
+      </button>
+      {section && range && (
+        <span className="section-controls">
+          {(["X", "Y", "Z"] as const).map((a) => (
+            <button key={a} className={section.axis === a ? "active" : ""} onClick={() => applySection(centreOn(a))} title={`Cut across ${a}`}>
+              {a}
+            </button>
+          ))}
+          <button onClick={() => applySection({ ...section, flip: !section.flip })} title="Keep the other half">
+            ⇄
+          </button>
+          <input
+            type="range"
+            aria-label="Section plane position"
+            min={range[0]}
+            max={range[1]}
+            step={Math.max(0.01, (range[1] - range[0]) / 400)}
+            value={Math.min(range[1], Math.max(range[0], section.offset))}
+            onChange={(e) => applySection({ ...section, offset: Number(e.target.value) })}
+            title={`Plane at ${section.axis} = ${section.offset.toFixed(1)} mm`}
+          />
+          <span className="section-value">{section.offset.toFixed(1)}</span>
+        </span>
+      )}
       <button
         className="nav-mode"
         title={`Navigation: ${MODE_LABEL[mode]} — ${MODE_HINT[mode]}. Click to change.`}

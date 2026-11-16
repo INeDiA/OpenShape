@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -15,4 +16,6 @@ export default defineConfig({
   // (SharedArrayBuffer); the app loads nothing from other origins.
   server: { port: 5176, headers: isolation },
   preview: { headers: isolation },
+  // Kernel tests run real OpenCascade: several seconds each when the suite runs in parallel.
+  test: { testTimeout: 30_000 },
 });

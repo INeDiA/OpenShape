@@ -204,3 +204,8 @@ button.wide { width: 100%; margin: 4px 0 10px; }
 .drawing-panel button.wide { width: 100%; margin-bottom: 8px; }
 .mode-switch button { min-width: 0; }
 .drawing-stage .picking-banner { top: auto; bottom: 12px; }
+
+/* Section view controls in the view bar. */
+.view-bar .section-controls { display: flex; align-items: center; gap: 3px; padding-left: 4px; border-left: 1px solid var(--border); }
+.view-bar .section-controls input[type="range"] { width: 120px; }
+.view-bar .section-value { font-size: 11px; color: var(--muted); min-width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
