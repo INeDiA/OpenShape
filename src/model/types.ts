@@ -150,6 +150,19 @@ export interface PatternFeature extends FeatureBase {
   target?: BodyId;
 }
 
+/** Combines existing bodies: the tools are added to, taken from or intersected with the target. */
+export interface BooleanFeature extends FeatureBase {
+  type: "boolean";
+  op: "join" | "cut" | "intersect";
+  /** Body that receives the result (keeps its id). */
+  target: BodyId;
+  tools: BodyId[];
+  /** Keep the tool bodies as they are (otherwise they're consumed). */
+  keepTools: boolean;
+  /** Subtract only: gap left around the tools (mm), e.g. for parts that must fit together. */
+  clearance?: number;
+}
+
 /** Moves and/or rotates one body (rotation about an axis through `pivot`, then translation). */
 export interface TransformFeature extends FeatureBase {
   type: "transform";
@@ -189,6 +202,7 @@ export type Feature =
   | MirrorFeature
   | PatternFeature
   | TransformFeature
+  | BooleanFeature
   | ImportFeature;
 
 export interface Variable {

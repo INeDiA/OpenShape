@@ -36,7 +36,7 @@ import type { BodyId, BooleanOp, Document, Feature, FeatureStatus, MeshData, Reg
 import { frameToLocal, frameToWorld, planeFrame, standardFrame, type Frame, type Vec3 } from "../model/frame";
 import { entityMap, pointOf } from "../sketch/model";
 import { curvePolyline } from "../sketch/curves";
-import { commonShapes, cutShapes, fuseShapes } from "./booleans";
+import { commonShapes, cutShapes, fuseShapes, offsetSolid } from "./booleans";
 import { coveTool } from "./cove";
 import { arcMidpoint, findLoops, loopPolygon, nestLoops, regionInteriorPoint, sketchRegions, type Loop } from "../sketch/profiles";
 import { parseSTL } from "../io/stl";
@@ -304,6 +304,12 @@ class Bodies {
     return null;
   }
 
+  /** Drops a body (consumed by a Boolean). */
+  remove(id: BodyId) {
+    this.map.delete(id);
+    if (this.last === id) this.last = [...this.map.keys()].pop() ?? null;
+  }
+
   /** Combines a new solid with the bodies according to `op`. */
   add(featureId: string, tool: NamedShape, op: BooleanOp, target?: BodyId) {
     const t = op === "new" ? null : this.target(target);
@@ -472,6 +478,26 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
       });
       bodies.add(f.id, loftThrough(wires, f.ruled, f.id), f.op, f.target);
       return;
+    }
+
+    case "boolean": {
+      if (!f.target) throw new Error("Pick the target body");
+      if (!f.tools.length) throw new Error("Pick the tool bodies");
+      const target = bodies.map.get(f.target);
+      if (!target) throw new Error("The target body no longer exists");
+      const missing = f.tools.filter((t) => !bodies.map.has(t) || t === f.target);
+      const tools = f.tools.filter((t) => t !== f.target && bodies.map.has(t)).map((t) => bodies.map.get(t)!);
+      if (!tools.length) throw new Error("None of the tool bodies exist anymore");
+      // A subtraction with clearance cuts with the tools grown by that gap.
+      const gap = f.op === "cut" ? (f.clearance ?? 0) : 0;
+      if (gap < 0) throw new Error("Clearance can't be negative");
+      const shapes = tools.map((t) => (gap > 0 ? offsetSolid(t.shape, gap) : t.shape));
+      const shape = f.op === "join" ? fuseShapes(target.shape, shapes) : f.op === "cut" ? cutShapes(target.shape, shapes) : commonShapes(target.shape, shapes);
+      if (!shape.faces.length) throw new Error(f.op === "intersect" ? "The bodies don't overlap" : "Nothing is left of the target");
+      const names = transferNames(shape, [target, ...tools], () => `${f.id}:new`);
+      bodies.set(f.target, { shape, names });
+      if (!f.keepTools) for (const t of f.tools) if (t !== f.target) bodies.remove(t);
+      return missing.length ? `${missing.length} of ${f.tools.length} tool bodies no longer exist` : undefined;
     }
 
     case "draft": {

@@ -134,6 +134,13 @@ export function validateDocument(raw: unknown): Document {
         need(typeof f.ruled === "boolean", `${at}.ruled must be true or false`);
         need(["new", "join", "cut", "intersect"].includes(f.op as string), `${at}.op is invalid`);
         break;
+      case "boolean":
+        need(["join", "cut", "intersect"].includes(f.op as string), `${at}.op is invalid`);
+        str(f.target, `${at}.target`);
+        need(Array.isArray(f.tools) && f.tools.every((x) => typeof x === "string"), `${at}.tools must be a list of body ids`);
+        if (typeof f.keepTools !== "boolean") f.keepTools = false;
+        if (f.clearance !== undefined) num(f.clearance, `${at}.clearance`);
+        break;
       case "draft":
         need(Array.isArray(f.faces) && f.faces.every((x) => typeof x === "string"), `${at}.faces must be a list of names`);
         str(f.neutral, `${at}.neutral`);

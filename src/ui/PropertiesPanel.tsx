@@ -41,6 +41,8 @@ interface Props {
   onEditSketch: (id: string) => void;
   canEditSketch: boolean;
   scope: Scope;
+  /** Bodies of the shown model (for Booleans). */
+  bodies: { id: string; name: string }[];
   /** Draft: pick the neutral face again in the viewport. */
   onPickNeutral: () => void;
   pickingNeutral: boolean;
@@ -104,7 +106,7 @@ const PLANES: [PlaneName, string][] = [
   ["YZ", "YZ (right)"],
 ];
 
-export function PropertiesPanel({ feature: f, sketches, status, onChange, onEditSketch, canEditSketch, scope, onPickNeutral, pickingNeutral }: Props) {
+export function PropertiesPanel({ feature: f, sketches, status, onChange, onEditSketch, canEditSketch, scope, bodies, onPickNeutral, pickingNeutral }: Props) {
   const sketchOptions = sketches.map((s) => [s.id, s.name] as [string, string]);
   if (!f) {
     return (
@@ -209,6 +211,51 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
           <Check label="Straight sides (ruled)" checked={f.ruled} onChange={(ruled) => onChange({ ruled })} />
           <Select label="Operation" value={f.op} options={OPS} onChange={(op) => onChange({ op })} />
           <p className="muted">Each sketch gives its largest closed profile; the solid passes through them in this order.</p>
+        </>
+      )}
+
+      {f.type === "boolean" && (
+        <>
+          <Select
+            label="Operation"
+            value={f.op}
+            options={[
+              ["join", "Union"],
+              ["cut", "Subtract"],
+              ["intersect", "Intersect"],
+            ]}
+            onChange={(op) => onChange({ op })}
+          />
+          <Select
+            label="Target"
+            value={f.target}
+            options={[["", "Click a body…"], ...bodies.map((b) => [b.id, b.name] as [string, string])]}
+            onChange={(target) => onChange({ target, tools: f.tools.filter((t) => t !== target) })}
+          />
+          <p>
+            <strong>
+              {f.tools.length} tool bod{f.tools.length === 1 ? "y" : "ies"}
+            </strong>
+          </p>
+          <ul className="body-list">
+            {f.tools.map((t) => (
+              <li key={t}>
+                <span>{bodies.find((b) => b.id === t)?.name ?? "Missing body"}</span>
+                <button className="ghost" title="Remove" onClick={() => onChange({ tools: f.tools.filter((x) => x !== t) })}>
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+          {f.op === "cut" && (
+            <Field label="Clearance (mm)" feature={{ ...f, clearance: f.clearance ?? 0 }} field="clearance" scope={scope} min={0} onChange={onChange} />
+          )}
+          <Check label="Keep tool bodies" checked={f.keepTools} onChange={(keepTools) => onChange({ keepTools })} />
+          <p className="muted">
+            The target keeps its name; the tools are {f.keepTools ? "kept as they are" : "used up"}.
+            {f.op === "cut" && " Clearance leaves that gap all around the tools (e.g. 0.2 mm for printed parts that fit together; keep the tools to use them as the mating part)."} Click bodies in the
+            viewport to add or remove tools.
+          </p>
         </>
       )}
 

@@ -63,7 +63,7 @@ Già fatto fuori sequenza: ~~selezione delle regioni di sketch sul modello~~ con
 
 Funzioni non ancora coperte (ordine indicativo, le più utili prima):
 
-18. Booleane fra corpi esistenti: unione, sottrazione, intersezione come strumento a sé
+18. ~~Booleane fra corpi esistenti~~: unione, sottrazione, intersezione come strumento a sé, con corpi strumento consumati o mantenuti e gioco (clearance) per i pezzi che devono incastrarsi
 19. Project: proiettare spigoli e facce del modello nello sketch come geometria di riferimento
 20. ~~Vista in sezione dal vivo~~: piano di taglio su X, Y o Z, lato invertibile, posizione col cursore, sezione piena colorata (tasto S)
 21. Piani di costruzione: sfalsati, inclinati, per tre punti, normali a uno spigolo
@@ -74,3 +74,14 @@ Funzioni non ancora coperte (ordine indicativo, le più utili prima):
 26. Rami alternativi della history (tool branching)
 27. Input: SpaceMouse (3Dconnexion), penna su tablet, palette dei comandi
 28. Rendering e screenshot
+
+Stampa 3D (ordine indicativo, le più utili prima):
+
+29. Analisi degli sbalzi: facce oltre 45° dalla verticale colorate nella vista (servono supporti), angolo regolabile
+30. Appoggia sulla faccia: un clic su una faccia ruota il corpo per appoggiarla sul piatto (orientamento di stampa)
+31. Profilo stampante: piatto, ugello, materiale e densità; ingombro del piatto nella scena, peso e costo stimati nelle misure
+32. Fori a goccia (teardrop) per fori orizzontali senza supporti e compensazione dei fori
+33. Export per corpo: un file per corpo o 3MF con oggetti separati, qualità della mesh regolabile
+34. Sedi per inserti filettati a caldo (M2–M5) già dimensionate
+35. Controllo dello spessore minimo delle pareti (sotto 2 × ugello)
+36. Testo in rilievo o inciso (con lo step 23)

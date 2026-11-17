@@ -4,6 +4,7 @@ import {
   demoDocument,
   hasBody,
   lastSketch,
+  makeBoolean,
   makeDraft,
   makeEdgeTreatment,
   makeExtrude,
@@ -160,7 +161,7 @@ export function App() {
   // so its edges/faces can be picked: fillet/chamfer (edges), shell and push/pull (faces).
   const selectedFeature = doc.features.find((f) => f.id === selectedId) ?? null;
   const pickingFeature = !editingSketchId && (selectedFeature?.type === "fillet" || selectedFeature?.type === "chamfer" || selectedFeature?.type === "cove") ? selectedFeature : null;
-  const faceFeature = !editingSketchId && (selectedFeature?.type === "shell" || selectedFeature?.type === "pushpull" || selectedFeature?.type === "draft") ? selectedFeature : null;
+  const faceFeature = !editingSketchId && (selectedFeature?.type === "shell" || selectedFeature?.type === "pushpull" || selectedFeature?.type === "draft" || selectedFeature?.type === "boolean") ? selectedFeature : null;
   // A draft first asks for its neutral face, then for the faces to tilt.
   const [repickNeutral, setRepickNeutral] = useState(false);
   const pickNeutral = faceFeature?.type === "draft" && (repickNeutral || !faceFeature.neutral);
@@ -326,7 +327,27 @@ export function App() {
     startSketchEdit(f.id);
   };
 
+  // Bodies of the shown model, with their names (the feature that created each).
+  const bodyList = useMemo(() => {
+    const ids = [...new Set(mesh?.faceBody ?? [])];
+    return ids.map((id) => ({ id, name: doc.features.find((f) => f.id === id)?.name ?? "Body" }));
+  }, [mesh, doc.features]);
+  const bodyOfFace = (name: string) => {
+    const i = mesh?.faceNames.indexOf(name) ?? -1;
+    return i >= 0 ? mesh!.faceBody[i] : null;
+  };
+
   const onPickFace = (name: string | null, additive: boolean) => {
+    if (faceFeature?.type === "boolean") {
+      const body = name ? bodyOfFace(name) : null;
+      if (!body) return;
+      // The first body picked is the target; the next ones are tools (click again to drop one).
+      if (!faceFeature.target) return commit(updateFeature(doc, faceFeature.id, { target: body, tools: faceFeature.tools.filter((t) => t !== body) }));
+      if (body === faceFeature.target) return flash("That's the target body: pick the bodies to combine with it");
+      const tools = faceFeature.tools.includes(body) ? faceFeature.tools.filter((t) => t !== body) : [...faceFeature.tools, body];
+      commit(updateFeature(doc, faceFeature.id, { tools }));
+      return;
+    }
     if (faceFeature?.type === "shell") {
       if (!name) return;
       const faces = faceFeature.faces.includes(name) ? faceFeature.faces.filter((n) => n !== name) : [...faceFeature.faces, name];
@@ -584,6 +605,16 @@ export function App() {
           >
             ⏥ Draft
           </button>
+          <button
+            disabled={bodyList.length < 2}
+            title={bodyList.length < 2 ? "Needs two or more bodies" : "Join, subtract or intersect bodies: pick the target, then the others"}
+            onClick={() => {
+              add(makeBoolean(doc, manip.selection.body ?? ""));
+              manip.clear();
+            }}
+          >
+            ⊕ Boolean
+          </button>
           <button disabled={!hasBody(doc)} onClick={() => add(makeMirror(doc))} title="Mirror the body across a plane">
             ⇋ Mirror
           </button>
@@ -679,9 +710,11 @@ export function App() {
                   ? pickNeutral
                     ? []
                     : [...faceFeature.faces, ...(faceFeature.neutral ? [faceFeature.neutral] : [])]
-                  : liveFaces
+                  : faceFeature?.type === "boolean"
+                    ? (mesh?.faceNames.filter((_, i) => faceFeature.tools.includes(mesh.faceBody[i])) ?? [])
+                    : liveFaces
           }
-          selectedBody={manip.selection.body}
+          selectedBody={faceFeature?.type === "boolean" ? faceFeature.target || null : manip.selection.body}
           onPickFace={onPickFace}
           pickableRegions={pickableRegions}
           axisCandidates={manip.axisCandidates}
@@ -736,7 +769,11 @@ export function App() {
                 ? pickNeutral
                   ? "Click the neutral face (its plane stays fixed)"
                   : "Click faces to draft"
-                : "Click the planar face to move"}{" "}
+                : faceFeature.type === "boolean"
+                  ? !faceFeature.target
+                    ? "Click the target body"
+                    : `Click bodies to ${faceFeature.op === "join" ? "join to it" : faceFeature.op === "cut" ? "subtract from it" : "intersect with it"}`
+                  : "Click the planar face to move"}{" "}
             · showing the model before <strong>{faceFeature.name}</strong>
           </div>
         )}
@@ -761,6 +798,7 @@ export function App() {
         onChange={(patch) => selected && commit(updateFeature(doc, selected.id, patch))}
         onEditSketch={startSketchEdit}
         canEditSketch={solverState === "ready" && !editingSketch}
+        bodies={bodyList}
         onPickNeutral={() => setRepickNeutral(true)}
         pickingNeutral={pickNeutral}
       />

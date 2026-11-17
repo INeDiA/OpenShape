@@ -77,6 +77,24 @@ export const fuseShapes = (shape: Shape3D, tools: Shape3D[], opts?: Options) => 
 export const cutShapes = (shape: Shape3D, tools: Shape3D[], opts?: Options) => run("Cut", shape, tools.map(wrapped), opts);
 export const commonShapes = (shape: Shape3D, tools: Shape3D[], opts?: Options) => run("Common", shape, tools.map(wrapped), opts);
 
+/**
+ * `shape` grown by `distance` in every direction (shrunk when negative): a
+ * true offset, so convex edges become rounds of that radius and the gap to
+ * the original is the same everywhere.
+ */
+export function offsetSolid(shape: Shape3D, distance: number): Shape3D {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const oc = getOC() as any;
+  const maker = new oc.BRepOffsetAPI_MakeOffsetShape();
+  try {
+    maker.PerformByJoin(wrapped(shape), distance, 1e-6, oc.BRepOffset_Mode.BRepOffset_Skin, false, false, oc.GeomAbs_JoinType.GeomAbs_Arc, false);
+    if (!maker.IsDone()) throw new Error(`Can't offset the body by ${distance} mm`);
+    return cast(maker.Shape()) as Shape3D;
+  } finally {
+    maker.delete();
+  }
+}
+
 /** The parts of `shape` on each side of the plane through `origin` with normal `n` (null when empty). */
 export function splitByPlane(shape: Shape3D, origin: Vec3, n: Vec3): { above: Shape3D | null; below: Shape3D | null } {
   const oc = getOC() as unknown as OC;
