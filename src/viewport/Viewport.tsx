@@ -8,6 +8,7 @@ import type { MeshData, SketchPreview } from "../model/types";
 import type { Vec3 } from "../model/frame";
 import { CameraNav, placeSketchCamera, type NavMode, type SketchCamera, type ViewName } from "./navigation";
 import { SectionView, sectionRange, type SectionAxis, type SectionSpec } from "./section";
+import { findOverhangs } from "./overhang";
 
 const NAV_MODE_KEY = "openshape.navMode";
 const readNavMode = (): NavMode => {
@@ -106,6 +107,8 @@ const AXIS = new LineMaterial({ color: 0x8e6cf0, linewidth: 2.5, worldUnits: fal
 const AXIS_WORLD = new LineMaterial({ color: 0x8e6cf0, linewidth: 2, worldUnits: false, dashed: true, dashSize: 4, gapSize: 3, transparent: true, opacity: 0.7 });
 const AXIS_HOVER = new LineMaterial({ color: 0x4f8cff, linewidth: 4, worldUnits: false });
 const HIDDEN = new THREE.MeshBasicMaterial({ visible: false });
+// Overhang analysis: faces that need support, drawn over the body.
+const OVERHANG = new THREE.MeshBasicMaterial({ color: 0xff3b30, transparent: true, opacity: 0.7, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
 // Sketch regions: drawn just in front of coplanar faces.
 const regionMat = (color: number, opacity: number) =>
   new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 });
@@ -167,6 +170,32 @@ interface SceneState {
   /** Live section: clipping plane and cap. */
   section: SectionView;
   sectionSpec: SectionSpec | null;
+  /** Overhang analysis: limit angle (degrees from vertical) when on, its overlay, and who wants the area. */
+  overhangAngle: number | null;
+  overhang: THREE.Mesh | null;
+  onOverhangs: ((area: number | null) => void) | null;
+}
+
+/** Recomputes the overhang overlay for the current mesh. */
+function refreshOverhangs(s: SceneState) {
+  if (s.overhang) {
+    s.overhang.parent?.remove(s.overhang);
+    s.overhang.geometry.dispose();
+    s.overhang = null;
+  }
+  let area: number | null = null;
+  if (s.overhangAngle !== null && s.mesh) {
+    const o = findOverhangs(s.mesh, s.overhangAngle);
+    area = o.area;
+    if (o.positions.length) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(o.positions, 3));
+      s.overhang = new THREE.Mesh(g, OVERHANG);
+      s.overhang.raycast = () => {}; // not pickable: clicks go to the faces below
+      s.model.add(s.overhang);
+    }
+  }
+  s.onOverhangs?.(area);
 }
 
 export function Viewport(props: Props) {
@@ -213,7 +242,7 @@ export function Viewport(props: Props) {
     const gizmos = new THREE.Group();
     const axisGroup = new THREE.Group();
     scene.add(model, overlayGroup, gizmos, axisGroup);
-    const section = new SectionView([BODY, HOVER, SELECTED, BODY_SELECTED, EDGE, EDGE_SELECTED, EDGE_HOVER, SKETCH, SKETCH_SEL]);
+    const section = new SectionView([BODY, HOVER, SELECTED, BODY_SELECTED, EDGE, EDGE_SELECTED, EDGE_HOVER, SKETCH, SKETCH_SEL, OVERHANG]);
     scene.add(section.group);
 
     const s: SceneState = {
@@ -221,7 +250,7 @@ export function Viewport(props: Props) {
       body: null, edgeLines: null, mesh: null, hoveredFace: null, hoveredEdge: null, hoveredHandle: null,
       selectedFaces: new Set(), selectedBody: null, hiddenBody: null, hiddenFaces: new Set(), rigid: null, ghost: null, sweep: null, dragging: false, nav: null, box: null, fitted: false,
       regions: [], hoveredRegion: null, selectedRegions: new Set(), axisGroup, axes: [], hoveredAxis: null,
-      section, sectionSpec: null,
+      section, sectionSpec: null, overhangAngle: null, overhang: null, onOverhangs: null,
     };
     /** First hit on the kept side of the section plane (the removed half isn't there). */
     const kept = <T extends THREE.Intersection>(hits: T[]): T | undefined => hits.find((h) => section.keeps(h.point));
@@ -580,6 +609,8 @@ export function Viewport(props: Props) {
       s.model.add(s.edgeLines);
     }
     s.section.update(s.sectionSpec, s.body, s.box);
+    s.overhang = null; // cleared with the model group
+    refreshOverhangs(s);
 
     for (const sk of sketches) {
       if (sk.id === props.hiddenSketchId) continue;
@@ -1082,6 +1113,24 @@ function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
     return { axis, flip: section?.flip ?? false, offset: Math.round(((lo + hi) / 2) * 10) / 10 };
   };
   const range = section ? sectionRange(state.current?.box ?? null, section.axis) : null;
+  // Overhang analysis: limit angle when on, and the area found.
+  const [overhang, setOverhang] = useState<number | null>(null);
+  const [overhangArea, setOverhangArea] = useState<number | null>(null);
+  // The scene is set up after this bar mounts (parent effects run last): hook in when switched on.
+  useEffect(
+    () => () => {
+      if (state.current) state.current.onOverhangs = null;
+    },
+    [state],
+  );
+  const applyOverhang = (angle: number | null) => {
+    setOverhang(angle);
+    const s = state.current;
+    if (!s) return;
+    s.onOverhangs = setOverhangArea;
+    s.overhangAngle = angle;
+    refreshOverhangs(s);
+  };
   const fit = () => state.current?.nav?.fit(state.current.box);
   const view = (v: ViewName) => state.current?.nav?.view(v, state.current.box);
 
@@ -1116,6 +1165,35 @@ function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
           {label}
         </button>
       ))}
+      <button
+        className={overhang !== null ? "active" : ""}
+        onClick={() => applyOverhang(overhang === null ? 45 : null)}
+        title="3D printing: show faces that need support (overhangs steeper than the limit, Z up)"
+      >
+        ⚠ Overhangs
+      </button>
+      {overhang !== null && (
+        <span className="section-controls">
+          <input
+            type="number"
+            className="overhang-angle"
+            aria-label="Overhang limit angle"
+            min={10}
+            max={89}
+            step={5}
+            value={overhang}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (v >= 10 && v <= 89) applyOverhang(v);
+            }}
+            title="Steepest overhang the printer handles, degrees from vertical"
+          />
+          <span className="section-value">°</span>
+          <span className={`overhang-area${overhangArea ? " bad" : ""}`} title="Area that needs support">
+            {overhangArea ? `${(overhangArea / 100).toFixed(1)} cm²` : "none"}
+          </span>
+        </span>
+      )}
       <button
         className={section ? "active" : ""}
         onClick={() => applySection(section ? null : centreOn("X"))}

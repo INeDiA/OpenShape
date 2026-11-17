@@ -77,7 +77,7 @@ Funzioni non ancora coperte (ordine indicativo, le più utili prima):
 
 Stampa 3D (ordine indicativo, le più utili prima):
 
-29. Analisi degli sbalzi: facce oltre 45° dalla verticale colorate nella vista (servono supporti), angolo regolabile
+29. ~~Analisi degli sbalzi~~: facce oltre il limite (45° dalla verticale, regolabile) colorate in rosso nella vista, con l'area da supportare; esclusa la base sul piatto
 30. Appoggia sulla faccia: un clic su una faccia ruota il corpo per appoggiarla sul piatto (orientamento di stampa)
 31. Profilo stampante: piatto, ugello, materiale e densità; ingombro del piatto nella scena, peso e costo stimati nelle misure
 32. Fori a goccia (teardrop) per fori orizzontali senza supporti e compensazione dei fori
