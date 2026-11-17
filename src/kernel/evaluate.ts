@@ -678,6 +678,28 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
       return;
     }
 
+    case "layflat": {
+      const owner = bodies.withFace(f.face);
+      const { point, normal } = planarFaceFrame(owner.shape, f.face, 0);
+      let shape = owner.shape.shape.clone();
+      // Turn the face's outward normal to point straight down, about the face itself.
+      const d = Math.max(-1, Math.min(1, -normal[2]));
+      if (d < 1 - 1e-12) {
+        let axis: Vec3 = [-normal[1], normal[0], 0]; // normal × (0, 0, -1)
+        if (Math.hypot(...axis) < 1e-9) axis = [1, 0, 0]; // facing up: half a turn
+        shape = shape.rotate((Math.acos(d) * 180) / Math.PI, point, axis);
+      }
+      // Rest on the bed.
+      const lo = shape.boundingBox.bounds[0][2];
+      if (Math.abs(lo) > 1e-9) shape = shape.translate([0, 0, -lo]);
+      const names = keepNames(owner.shape, shape);
+      bodies.set(owner.id, { shape, names });
+      // The face may not be the lowest part (e.g. at the bottom of a recess).
+      const moved = shape.faces.find((x) => names.get(x.hashCode) === f.face);
+      const faceZ = moved ? moved.boundingBox.bounds[0][2] : 0;
+      return faceZ > 1e-3 ? `The body rests on other faces: this one stays ${faceZ.toFixed(2)} mm above the bed` : undefined;
+    }
+
     case "import": {
       const bytes = base64ToBytes(f.data);
       const shape = f.format === "step" ? asSolid(await importSTEP(new Blob([bytes]))) : stlToSolid(bytes);

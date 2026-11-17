@@ -134,6 +134,9 @@ export function validateDocument(raw: unknown): Document {
         need(typeof f.ruled === "boolean", `${at}.ruled must be true or false`);
         need(["new", "join", "cut", "intersect"].includes(f.op as string), `${at}.op is invalid`);
         break;
+      case "layflat":
+        str(f.face, `${at}.face`);
+        break;
       case "boolean":
         need(["join", "cut", "intersect"].includes(f.op as string), `${at}.op is invalid`);
         str(f.target, `${at}.target`);

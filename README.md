@@ -78,7 +78,7 @@ Funzioni non ancora coperte (ordine indicativo, le più utili prima):
 Stampa 3D (ordine indicativo, le più utili prima):
 
 29. ~~Analisi degli sbalzi~~: facce oltre il limite (45° dalla verticale, regolabile) colorate in rosso nella vista, con l'area da supportare; esclusa la base sul piatto
-30. Appoggia sulla faccia: un clic su una faccia ruota il corpo per appoggiarla sul piatto (orientamento di stampa)
+30. ~~Appoggia sulla faccia~~ (Lay flat): il corpo ruota per appoggiare la faccia piana scelta sul piatto (z = 0), con avviso se la faccia non può toccarlo
 31. Profilo stampante: piatto, ugello, materiale e densità; ingombro del piatto nella scena, peso e costo stimati nelle misure
 32. Fori a goccia (teardrop) per fori orizzontali senza supporti e compensazione dei fori
 33. Export per corpo: un file per corpo o 3MF con oggetti separati, qualità della mesh regolabile

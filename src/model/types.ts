@@ -163,6 +163,12 @@ export interface BooleanFeature extends FeatureBase {
   clearance?: number;
 }
 
+/** 3D printing: turns the body so a planar face lies on the bed (z = 0, facing down). */
+export interface LayFlatFeature extends FeatureBase {
+  type: "layflat";
+  face: string;
+}
+
 /** Moves and/or rotates one body (rotation about an axis through `pivot`, then translation). */
 export interface TransformFeature extends FeatureBase {
   type: "transform";
@@ -203,6 +209,7 @@ export type Feature =
   | PatternFeature
   | TransformFeature
   | BooleanFeature
+  | LayFlatFeature
   | ImportFeature;
 
 export interface Variable {

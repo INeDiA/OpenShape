@@ -286,6 +286,12 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
         </>
       )}
 
+      {f.type === "layflat" && (
+        <p className="muted">
+          Face <code title={f.face}>{shortName(f.face)}</code> lies on the bed (z = 0), facing down: the print orientation. Click another planar face to change it; turn on ⚠ Overhangs to compare.
+        </p>
+      )}
+
       {f.type === "shell" && (
         <>
           <Field label="Thickness" feature={f} field="thickness" scope={scope} min={0.001} onChange={onChange} />

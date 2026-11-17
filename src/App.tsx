@@ -8,6 +8,7 @@ import {
   makeDraft,
   makeEdgeTreatment,
   makeExtrude,
+  makeLayFlat,
   makeLoft,
   makeSweep,
   makeImport,
@@ -161,7 +162,7 @@ export function App() {
   // so its edges/faces can be picked: fillet/chamfer (edges), shell and push/pull (faces).
   const selectedFeature = doc.features.find((f) => f.id === selectedId) ?? null;
   const pickingFeature = !editingSketchId && (selectedFeature?.type === "fillet" || selectedFeature?.type === "chamfer" || selectedFeature?.type === "cove") ? selectedFeature : null;
-  const faceFeature = !editingSketchId && (selectedFeature?.type === "shell" || selectedFeature?.type === "pushpull" || selectedFeature?.type === "draft" || selectedFeature?.type === "boolean") ? selectedFeature : null;
+  const faceFeature = !editingSketchId && (selectedFeature?.type === "shell" || selectedFeature?.type === "pushpull" || selectedFeature?.type === "draft" || selectedFeature?.type === "boolean" || selectedFeature?.type === "layflat") ? selectedFeature : null;
   // A draft first asks for its neutral face, then for the faces to tilt.
   const [repickNeutral, setRepickNeutral] = useState(false);
   const pickNeutral = faceFeature?.type === "draft" && (repickNeutral || !faceFeature.neutral);
@@ -365,6 +366,11 @@ export function App() {
       if (name === faceFeature.neutral) return flash("That's the neutral face: it stays fixed");
       const faces = faceFeature.faces.includes(name) ? faceFeature.faces.filter((n) => n !== name) : [...faceFeature.faces, name];
       commit(updateFeature(doc, faceFeature.id, { faces }));
+      return;
+    }
+    if (faceFeature?.type === "layflat") {
+      if (name && faceInfo.get(name)) commit(updateFeature(doc, faceFeature.id, { face: name }));
+      else if (name) flash("Lay flat needs a planar face");
       return;
     }
     if (faceFeature?.type === "pushpull") {
@@ -585,6 +591,16 @@ export function App() {
             ⇕ Push/Pull
           </button>
           <button
+            disabled={!singlePlanarFace}
+            title="3D printing: turn the body so the selected planar face lies on the bed"
+            onClick={() => {
+              add(makeLayFlat(doc, singlePlanarFace!));
+              manip.clear();
+            }}
+          >
+            ⤓ Lay flat
+          </button>
+          <button
             disabled={!hasBody(doc)}
             title="Hollow the body; selected faces become openings"
             onClick={() => {
@@ -704,7 +720,7 @@ export function App() {
           selectedFaces={
             faceFeature?.type === "shell"
               ? faceFeature.faces
-              : faceFeature?.type === "pushpull"
+              : faceFeature?.type === "pushpull" || faceFeature?.type === "layflat"
                 ? [faceFeature.face]
                 : faceFeature?.type === "draft"
                   ? pickNeutral
@@ -769,7 +785,9 @@ export function App() {
                 ? pickNeutral
                   ? "Click the neutral face (its plane stays fixed)"
                   : "Click faces to draft"
-                : faceFeature.type === "boolean"
+                : faceFeature.type === "layflat"
+                  ? "Click the planar face to put on the bed"
+                  : faceFeature.type === "boolean"
                   ? !faceFeature.target
                     ? "Click the target body"
                     : `Click bodies to ${faceFeature.op === "join" ? "join to it" : faceFeature.op === "cut" ? "subtract from it" : "intersect with it"}`

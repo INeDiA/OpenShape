@@ -1,4 +1,4 @@
-import type { BooleanOp, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, PlaneName, ImportFeature, MirrorFeature, PatternFeature, PushPullFeature, RevolveFeature, ShellFeature, SketchFeature, CoveFeature, SweepFeature, LoftFeature, DraftFeature, BooleanFeature, BodyId } from "./types";
+import type { BooleanOp, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, PlaneName, ImportFeature, MirrorFeature, PatternFeature, PushPullFeature, RevolveFeature, ShellFeature, SketchFeature, CoveFeature, SweepFeature, LoftFeature, DraftFeature, BooleanFeature, BodyId, LayFlatFeature } from "./types";
 import { emptySketch, type SketchData } from "../sketch/model";
 import { addCircle, addConstraint, addRectangle } from "../sketch/builders";
 
@@ -61,6 +61,10 @@ export function makeDraft(doc: Document, faces: string[], neutral = ""): DraftFe
 
 export function makeBoolean(doc: Document, target: BodyId | "", op: BooleanFeature["op"] = "join"): BooleanFeature {
   return { type: "boolean", id: newId("bo"), name: nextName(doc, "Boolean"), suppressed: false, op, target, tools: [], keepTools: false };
+}
+
+export function makeLayFlat(doc: Document, face: string): LayFlatFeature {
+  return { type: "layflat", id: newId("lf"), name: nextName(doc, "Lay flat"), suppressed: false, face };
 }
 
 /** Sketches a feature consumes, with the regions it uses (all when absent). */

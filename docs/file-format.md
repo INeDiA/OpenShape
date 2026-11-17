@@ -57,7 +57,7 @@ Every feature has:
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | Unique within the document. Referenced by other features. |
-| `type` | string | `sketch`, `extrude`, `revolve`, `sweep`, `loft`, `fillet`, `chamfer`, `cove`, `draft`, `pushpull`, `shell`, `mirror`, `pattern`, `transform`, `boolean`, `import` |
+| `type` | string | `sketch`, `extrude`, `revolve`, `sweep`, `loft`, `fillet`, `chamfer`, `cove`, `draft`, `pushpull`, `shell`, `mirror`, `pattern`, `transform`, `boolean`, `layflat`, `import` |
 | `name` | string | Display name. |
 | `suppressed` | boolean | Skipped during replay when true. |
 | `exprs` | object, optional | Maps a numeric field name to an expression, e.g. `{ "distance": "height / 2" }`. The field still holds the last computed number. |
@@ -84,6 +84,7 @@ Type-specific fields:
 - **mirror**: `plane` (`"XY"`, `"XZ"`, `"YZ"`), `offset`. The mirrored copy is joined to the body.
 - **pattern**: `mode` (`"linear"` or `"circular"`), `axis` (`"X"`, `"Y"`, `"Z"`), `count` (instances including the original), `spacing` (linear, mm), `angle` (circular, degrees; 360 spreads evenly). Copies are joined.
 - **transform**: `body` (body id), `dx`, `dy`, `dz` (translation, mm), `axis` and `angle` (rotation in degrees about an axis through `pivotX/Y/Z`, applied before the translation).
+- **layflat**: `face` (persistent name of a planar face). Turns the body owning it so the face points straight down, then moves it so the body's lowest point is at z = 0 (the print bed). Faces keep their names.
 - **boolean**: `op` (`"join"`, `"cut"`, `"intersect"`), `target` (body id that receives the result and keeps its id), `tools` (body ids combined with it), `keepTools` (false: the tool bodies are consumed), `clearance?` (cut only: the tools are grown by this gap in mm before subtracting, rounded at their convex edges, so the gap is the same all around). New faces are named `<booleanId>:new`.
 - **import**: `fileName`, `format` (`"step"` or `"stl"`), `data` (base64 file content), `op`.
 
