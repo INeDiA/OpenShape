@@ -4,6 +4,7 @@ import { isDimension, sketchLines } from "../sketch/model";
 import { ExprInput } from "./ExprInput";
 import { findLoops } from "../sketch/profiles";
 import { useEffect, useState } from "react";
+import { INSERT_SIZES } from "../model/doc";
 
 /** Feature name, edited in place; commits on Enter or blur, Escape restores it. */
 function NameInput({ name, onRename }: { name: string; onRename: (name: string) => void }) {
@@ -350,6 +351,28 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
               ? "Adds this much to each hole's radius: 0.1–0.2 mm is typical for FDM. Pins can't be shrunk this way."
               : "Horizontal holes get a 45° roof (Z up), so they print without supports; vertical holes don't need it."}{" "}
             Click holes in the viewport to add or remove them.
+          </p>
+        </>
+      )}
+
+      {f.type === "insert" && (
+        <>
+          <Select
+            label="Insert"
+            value={f.size}
+            options={[...(Object.keys(INSERT_SIZES) as (keyof typeof INSERT_SIZES)[]).map((k): [typeof f.size, string] => [k, `${k} (Ø ${INSERT_SIZES[k].diameter} × ${INSERT_SIZES[k].depth})`]), ["custom", "Custom"]]}
+            onChange={(size) => onChange(size === "custom" ? { size } : { size, ...INSERT_SIZES[size] })}
+          />
+          <Field label="Seat Ø (mm)" feature={f} field="diameter" scope={scope} min={0.001} onChange={(p) => onChange({ ...p, size: "custom" } as Partial<Feature>)} />
+          <Field label="Depth (mm)" feature={f} field="depth" scope={scope} min={0.001} onChange={(p) => onChange({ ...p, size: "custom" } as Partial<Feature>)} />
+          <Check label="Through holes: lower opening" checked={f.flip} onChange={(flip) => onChange({ flip })} />
+          <p>
+            <strong>
+              {f.faces.length} hole{f.faces.length === 1 ? "" : "s"}
+            </strong>
+          </p>
+          <p className="muted">
+            Model the pilot hole (the screw's size or smaller), then pick it: the seat widens it from its opening. Sizes are typical for short inserts; check your insert's datasheet. Click holes in the viewport to add or remove them.
           </p>
         </>
       )}

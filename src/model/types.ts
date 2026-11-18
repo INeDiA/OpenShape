@@ -213,6 +213,21 @@ export interface HoleFitFeature extends FeatureBase {
   amount: number;
 }
 
+/** 3D printing: seats for heat-set threaded inserts, in existing holes from their opening. */
+export interface InsertFeature extends FeatureBase {
+  type: "insert";
+  /** Cylindrical hole faces (the pilot holes). */
+  faces: string[];
+  /** Preset the size came from, or "custom". */
+  size: "M2" | "M2.5" | "M3" | "M4" | "M5" | "custom";
+  /** Seat diameter, mm. */
+  diameter: number;
+  /** Seat depth from the hole's opening, mm. */
+  depth: number;
+  /** For a through hole: seat at the lower opening instead of the upper. */
+  flip: boolean;
+}
+
 /** 3D printing: turns the body so a planar face lies on the bed (z = 0, facing down). */
 export interface LayFlatFeature extends FeatureBase {
   type: "layflat";
@@ -263,6 +278,7 @@ export type Feature =
   | PlaneFeature
   | TeardropFeature
   | HoleFitFeature
+  | InsertFeature
   | ImportFeature;
 
 export interface Variable {

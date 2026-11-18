@@ -45,7 +45,7 @@ import { treatEdges } from "./edgeTreatment";
 import { blendCorners, mixedRadiusCorners } from "./vertexBlend";
 import { loftThrough, sweepAlong } from "./sweepLoft";
 import { draftFaces } from "./draft";
-import { cylinderOf, holeFitTool, teardropTool } from "./holes";
+import { cylinderOf, holeFitTool, insertTool, teardropTool } from "./holes";
 import { sketchPath, type SketchPath } from "../sketch/path";
 import { loopArea } from "../sketch/profiles";
 
@@ -765,12 +765,16 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
     }
 
     case "teardrop":
-    case "holefit": {
+    case "holefit":
+    case "insert": {
       if (!f.faces.length) throw new Error("Select the hole faces");
       if (f.type === "holefit" && f.amount <= 0) throw new Error("The amount must be > 0");
+      if (f.type === "insert" && (f.diameter <= 0 || f.depth <= 0)) throw new Error("Diameter and depth must be > 0");
       const owner = bodies.withFace(f.faces[0]);
       const holes = f.faces.map((name) => ({ name, c: cylinderOf(owner.shape.shape, faceByName(owner.shape, name)) }));
-      const tools = holes.map(({ c }) => (f.type === "teardrop" ? teardropTool(c, f.flat) : holeFitTool(c, f.amount)));
+      const tools = holes.map(({ c }) =>
+        f.type === "teardrop" ? teardropTool(c, f.flat) : f.type === "insert" ? insertTool(owner.shape.shape, c, f.diameter, f.depth, f.flip) : holeFitTool(c, f.amount),
+      );
       const shape = cutShapes(owner.shape.shape, tools);
       // New faces are named after the hole they belong to (the nearest axis).
       const names = transferNames(shape, [owner.shape], (_face, sample) => {
@@ -781,7 +785,7 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
           const off = Math.hypot(d[0] - t * c.axis[0], d[1] - t * c.axis[1], d[2] - t * c.axis[2]);
           if (off < bestD) [best, bestD] = [name, off];
         }
-        return `${f.id}:${f.type === "teardrop" ? "roof" : "hole"}:${best}`;
+        return `${f.id}:${f.type === "teardrop" ? "roof" : f.type === "insert" ? "seat" : "hole"}:${best}`;
       });
       bodies.set(owner.id, { shape, names });
       return;

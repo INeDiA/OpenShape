@@ -152,6 +152,14 @@ export function validateDocument(raw: unknown): Document {
         if (f.type === "teardrop") need(typeof f.flat === "boolean", `${at}.flat must be true or false`);
         else num(f.amount, `${at}.amount`);
         break;
+      case "insert":
+        need(Array.isArray(f.faces) && f.faces.every((x) => typeof x === "string"), `${at}.faces must be a list of names`);
+        need(["M2", "M2.5", "M3", "M4", "M5", "custom"].includes(f.size as string), `${at}.size is invalid`);
+        num(f.diameter, `${at}.diameter`);
+        num(f.depth, `${at}.depth`);
+        if (f.flip === undefined) f.flip = false;
+        need(typeof f.flip === "boolean", `${at}.flip must be true or false`);
+        break;
       case "layflat":
         str(f.face, `${at}.face`);
         break;

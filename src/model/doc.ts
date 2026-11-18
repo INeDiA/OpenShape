@@ -1,4 +1,4 @@
-import type { BooleanOp, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, PlaneName, ImportFeature, MirrorFeature, PatternFeature, PushPullFeature, RevolveFeature, ShellFeature, SketchFeature, CoveFeature, SweepFeature, LoftFeature, DraftFeature, BooleanFeature, BodyId, LayFlatFeature, PlaneFeature, TeardropFeature, HoleFitFeature } from "./types";
+import type { BooleanOp, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, PlaneName, ImportFeature, MirrorFeature, PatternFeature, PushPullFeature, RevolveFeature, ShellFeature, SketchFeature, CoveFeature, SweepFeature, LoftFeature, DraftFeature, BooleanFeature, BodyId, LayFlatFeature, PlaneFeature, TeardropFeature, HoleFitFeature, InsertFeature } from "./types";
 import { emptySketch, type SketchData } from "../sketch/model";
 import { addCircle, addConstraint, addRectangle } from "../sketch/builders";
 
@@ -73,6 +73,19 @@ export function makeSketchOnPlane(doc: Document, planeId: string): SketchFeature
 
 export function makeTeardrop(doc: Document, faces: string[]): TeardropFeature {
   return { type: "teardrop", id: newId("td"), name: nextName(doc, "Teardrop"), suppressed: false, faces, flat: false };
+}
+
+/** Typical heat-set insert seats (hole Ø × depth, mm) for the common short inserts. */
+export const INSERT_SIZES = {
+  M2: { diameter: 3.2, depth: 4.0 },
+  "M2.5": { diameter: 3.6, depth: 5.0 },
+  M3: { diameter: 4.0, depth: 5.7 },
+  M4: { diameter: 5.6, depth: 8.1 },
+  M5: { diameter: 6.4, depth: 9.5 },
+} as const;
+
+export function makeInsert(doc: Document, faces: string[]): InsertFeature {
+  return { type: "insert", id: newId("in"), name: nextName(doc, "Insert seat"), suppressed: false, faces, size: "M3", ...INSERT_SIZES.M3, flip: false };
 }
 
 export function makeHoleFit(doc: Document, faces: string[], amount = 0.15): HoleFitFeature {

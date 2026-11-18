@@ -1,7 +1,7 @@
 // 3D printing helpers for holes: teardrop roofs (horizontal holes print
 // without supports) and hole compensation (printed holes come out small).
 
-import { basicFaceExtrusion, getOC, makeCylinder, makePolygon, Vector, type Face, type Shape3D } from "replicad";
+import { basicFaceExtrusion, getOC, makeBox, makeCylinder, makePolygon, measureVolume, Vector, type Face, type Shape3D } from "replicad";
 import type { Vec3 } from "../model/frame";
 import { faceSamples } from "./naming";
 
@@ -87,4 +87,48 @@ export function holeFitTool(c: Cylinder, amount: number): Shape3D {
   if (!c.hole) throw new Error("Hole compensation works on holes (this is a pin)");
   const extra = 0.01;
   return makeCylinder(c.radius + amount, c.length + 2 * extra, add(c.start, c.axis, -extra), c.axis) as unknown as Shape3D;
+}
+
+/** Whether `p` lies inside the solid `shape` (a tiny cube there keeps some volume). */
+function inside(shape: Shape3D, p: Vec3): boolean {
+  const h = 0.01;
+  const probe = makeBox([p[0] - h, p[1] - h, p[2] - h], [p[0] + h, p[1] + h, p[2] + h]);
+  try {
+    return measureVolume(shape.intersect(probe)) > 1e-9;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Where a hole opens to the outside, as a point on its axis and the direction
+ * into the material. A through hole opens at both ends: the upper one (or the
+ * other with `flip`).
+ */
+export function holeEntry(shape: Shape3D, c: Cylinder, flip = false): { at: Vec3; into: Vec3 } {
+  const eps = 0.05;
+  const end = add(c.start, c.axis, c.length);
+  // Just beyond each end, next to the wall: open air at an opening, material at a blind bottom.
+  const radial = unit(Math.abs(c.axis[2]) < 0.9 ? cross(c.axis, [0, 0, 1]) : cross(c.axis, [1, 0, 0]));
+  const probe = (p: Vec3, out: Vec3) => add(add(p, out, eps), radial, c.radius * 0.5);
+  const openStart = !inside(shape, probe(c.start, c.axis.map((x) => -x) as Vec3));
+  const openEnd = !inside(shape, probe(end, c.axis));
+  const fromStart = { at: c.start, into: c.axis };
+  const fromEnd = { at: end, into: c.axis.map((x) => -x) as Vec3 };
+  let pick: typeof fromStart;
+  if (openStart && openEnd) pick = end[2] > c.start[2] + 1e-6 || (Math.abs(end[2] - c.start[2]) <= 1e-6 && dot(c.axis, [1, 1, 1]) > 0) ? fromEnd : fromStart;
+  else if (openStart) pick = fromStart;
+  else if (openEnd) pick = fromEnd;
+  else throw new Error("The hole doesn't open to the outside");
+  if (flip && openStart && openEnd) pick = pick === fromEnd ? fromStart : fromEnd;
+  return pick;
+}
+
+/** The seat for a heat-set insert: a cylinder of `diameter` from the hole's opening, `depth` deep. */
+export function insertTool(shape: Shape3D, c: Cylinder, diameter: number, depth: number, flip = false): Shape3D {
+  if (!c.hole) throw new Error("Insert seats go in holes (this is a pin)");
+  if (diameter / 2 < c.radius - 1e-6) throw new Error(`The hole (Ø ${(c.radius * 2).toFixed(2)}) is already wider than the insert seat`);
+  const { at, into } = holeEntry(shape, c, flip);
+  const extra = 0.01;
+  return makeCylinder(diameter / 2, depth + extra, add(at, into, -extra), into) as unknown as Shape3D;
 }

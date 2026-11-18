@@ -57,7 +57,7 @@ Every feature has:
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | Unique within the document. Referenced by other features. |
-| `type` | string | `sketch`, `plane`, `extrude`, `revolve`, `sweep`, `loft`, `fillet`, `chamfer`, `cove`, `draft`, `pushpull`, `shell`, `mirror`, `pattern`, `transform`, `boolean`, `layflat`, `teardrop`, `holefit`, `import` |
+| `type` | string | `sketch`, `plane`, `extrude`, `revolve`, `sweep`, `loft`, `fillet`, `chamfer`, `cove`, `draft`, `pushpull`, `shell`, `mirror`, `pattern`, `transform`, `boolean`, `layflat`, `teardrop`, `holefit`, `insert`, `import` |
 | `name` | string | Display name. |
 | `suppressed` | boolean | Skipped during replay when true. |
 | `exprs` | object, optional | Maps a numeric field name to an expression, e.g. `{ "distance": "height / 2" }`. The field still holds the last computed number. |
@@ -87,6 +87,7 @@ Type-specific fields:
 - **transform**: `body` (body id), `dx`, `dy`, `dz` (translation, mm), `axis` and `angle` (rotation in degrees about an axis through `pivotX/Y/Z`, applied before the translation).
 - **teardrop**: `faces` (cylindrical hole faces), `flat` (cut the roof flat at the top of the hole). Adds a 45° roof over each horizontal hole (Z up) so it prints without supports; vertical holes are refused. New faces are named `<id>:roof:<hole face>`.
 - **holefit**: `faces` (cylindrical hole faces), `amount` (mm added to each radius, along the whole hole). Pins are refused. New faces are named `<id>:hole:<hole face>`.
+- **insert**: seats for heat-set threaded inserts. `faces` (cylindrical pilot-hole faces), `size` (`M2`, `M2.5`, `M3`, `M4`, `M5` or `custom`: the preset the numbers came from), `diameter` and `depth` (mm, the seat cut from the hole's opening), `flip` (through holes: seat at the lower opening instead of the upper). Blind holes use their open end. Pins, and holes already wider than the seat, are refused. New faces are named `<id>:seat:<hole face>`.
 - **layflat**: `face` (persistent name of a planar face). Turns the body owning it so the face points straight down, then moves it so the body's lowest point is at z = 0 (the print bed). Faces keep their names.
 - **boolean**: `op` (`"join"`, `"cut"`, `"intersect"`), `target` (body id that receives the result and keeps its id), `tools` (body ids combined with it), `keepTools` (false: the tool bodies are consumed), `clearance?` (cut only: the tools are grown by this gap in mm before subtracting, rounded at their convex edges, so the gap is the same all around). New faces are named `<booleanId>:new`.
 - **import**: `fileName`, `format` (`"step"` or `"stl"`), `data` (base64 file content), `op`.

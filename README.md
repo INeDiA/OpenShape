@@ -82,5 +82,5 @@ Stampa 3D (ordine indicativo, le più utili prima):
 31. ~~Profilo stampante~~: piatto, ugello, pareti, riempimento, materiale, densità e prezzo (preferenza del browser); piatto e volume di stampa nella scena con avviso se il pezzo non ci sta; peso e costo stimati nelle misure del corpo
 32. ~~Fori a goccia e compensazione dei fori~~: tetto a 45° (a punta o piatto) sui fori orizzontali, fori allargati di un valore scelto
 33. ~~Export per corpo~~: finestra di export con formato, corpi da esportare, 3MF con oggetti separati o un file per corpo (zip), qualità della mesh
-34. Sedi per inserti filettati a caldo (M2–M5) già dimensionate
+34. ~~Sedi per inserti filettati a caldo~~: misure M2–M5 preimpostate (o libere) applicate ai fori pilota, dall'apertura (fori passanti: sopra o sotto)
 35. Controllo dello spessore minimo delle pareti (sotto 2 × ugello)

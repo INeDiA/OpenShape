@@ -12,6 +12,7 @@ import {
   makeLayFlat,
   makeTeardrop,
   makeHoleFit,
+  makeInsert,
   makePlane,
   makeLoft,
   makeSweep,
@@ -175,7 +176,7 @@ export function App() {
   // so its edges/faces can be picked: fillet/chamfer (edges), shell and push/pull (faces).
   const selectedFeature = doc.features.find((f) => f.id === selectedId) ?? null;
   const pickingFeature = !editingSketchId && (selectedFeature?.type === "fillet" || selectedFeature?.type === "chamfer" || selectedFeature?.type === "cove") ? selectedFeature : null;
-  const faceFeature = !editingSketchId && (selectedFeature?.type === "shell" || selectedFeature?.type === "pushpull" || selectedFeature?.type === "draft" || selectedFeature?.type === "boolean" || selectedFeature?.type === "layflat" || selectedFeature?.type === "teardrop" || selectedFeature?.type === "holefit") ? selectedFeature : null;
+  const faceFeature = !editingSketchId && (selectedFeature?.type === "shell" || selectedFeature?.type === "pushpull" || selectedFeature?.type === "draft" || selectedFeature?.type === "boolean" || selectedFeature?.type === "layflat" || selectedFeature?.type === "teardrop" || selectedFeature?.type === "holefit" || selectedFeature?.type === "insert") ? selectedFeature : null;
   // A draft first asks for its neutral face, then for the faces to tilt.
   const [repickNeutral, setRepickNeutral] = useState(false);
   const pickNeutral = faceFeature?.type === "draft" && (repickNeutral || !faceFeature.neutral);
@@ -406,7 +407,7 @@ export function App() {
       commit(updateFeature(doc, faceFeature.id, { faces }));
       return;
     }
-    if (faceFeature?.type === "teardrop" || faceFeature?.type === "holefit") {
+    if (faceFeature?.type === "teardrop" || faceFeature?.type === "holefit" || faceFeature?.type === "insert") {
       if (!name) return;
       if (!cylindrical.has(name)) return flash("Pick the hole's cylindrical face");
       const faces = faceFeature.faces.includes(name) ? faceFeature.faces.filter((n) => n !== name) : [...faceFeature.faces, name];
@@ -741,6 +742,14 @@ export function App() {
           title: "Widen holes a little: printed holes come out small (select the holes, or click them next)",
           run: () => (add(makeHoleFit(doc, sel.faces.filter((n) => cylindrical.has(n)))), manip.clear()),
         },
+        {
+          id: "insert",
+          label: "Insert seats",
+          icon: "insert",
+          disabled: !hasBody(doc),
+          title: "Seats for heat-set threaded inserts (M2–M5) in holes, from their opening (select the pilot holes, or click them next)",
+          run: () => (add(makeInsert(doc, sel.faces.filter((n) => cylindrical.has(n)))), manip.clear()),
+        },
         { id: "layflat", label: "Lay flat", icon: "layflat", disabled: !singlePlanarFace, title: singlePlanarFace ? "Turn the body so the selected planar face lies on the bed" : "Select one planar face first", run: () => (add(makeLayFlat(doc, singlePlanarFace!)), manip.clear()) },
         { heading: "Overhangs: Inspect, top right of the view" },
       ],
@@ -762,7 +771,7 @@ export function App() {
   const pick = (...ids: string[]) => ids.map(commandById).filter((c): c is Command => !!c);
   contextRef.current = {
     face: pick("plane", "layflat", "draft"),
-    cylinder: pick("teardrop", "holefit"),
+    cylinder: pick("teardrop", "holefit", "insert"),
     faces: pick("plane"),
     edge: pick("plane"),
     body: bodyList.length > 1 ? pick("boolean", "mirror", "pattern") : pick("mirror", "pattern"),
@@ -862,7 +871,7 @@ export function App() {
             commit(updateFeature(doc, pickingFeature.id, { edges }));
           }}
           selectedFaces={
-            faceFeature?.type === "shell" || faceFeature?.type === "teardrop" || faceFeature?.type === "holefit"
+            faceFeature?.type === "shell" || faceFeature?.type === "teardrop" || faceFeature?.type === "holefit" || faceFeature?.type === "insert"
               ? faceFeature.faces
               : faceFeature?.type === "pushpull" || faceFeature?.type === "layflat"
                 ? [faceFeature.face]
@@ -943,7 +952,7 @@ export function App() {
                   : "Click faces to draft"
                 : faceFeature.type === "layflat"
                   ? "Click the planar face to put on the bed"
-                  : faceFeature.type === "teardrop" || faceFeature.type === "holefit"
+                  : faceFeature.type === "teardrop" || faceFeature.type === "holefit" || faceFeature.type === "insert"
                   ? "Click the holes (their cylindrical faces)"
                   : faceFeature.type === "boolean"
                   ? !faceFeature.target

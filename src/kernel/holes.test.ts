@@ -4,7 +4,7 @@ import opencascade from "replicad-opencascadejs";
 import { measureVolume, setOC } from "replicad";
 import { addCircle, addRectangle } from "../sketch/builders";
 import { emptySketch } from "../sketch/model";
-import { makeExtrude, makeHoleFit, makeSketch, makeTeardrop } from "../model/doc";
+import { makeExtrude, makeHoleFit, makeInsert, makeSketch, makeTeardrop } from "../model/doc";
 import type { Document, Feature } from "../model/types";
 import { evaluate } from "./evaluate";
 import { validateDocument } from "../io/fileFormat";
@@ -84,5 +84,59 @@ describe("hole compensation", () => {
     const { doc, horizontal } = await block();
     const parsed = validateDocument(JSON.parse(JSON.stringify({ ...doc, features: [...doc.features, makeTeardrop(doc, [horizontal]), makeHoleFit(doc, [horizontal])] })));
     expect(parsed.features.slice(-2).map((f) => f.type)).toEqual(["teardrop", "holefit"]);
+  });
+});
+
+/** 30 × 30 × 15 block with a blind Ø 2.5 pilot hole 12 deep from the top, at the centre. */
+async function blind() {
+  const doc: Document = { variables: [], features: [] };
+  const s = makeSketch(doc, "XY", 0, addRectangle(emptySketch(), -15, -15, 15, 15).sketch);
+  const ex = { ...makeExtrude(doc, s.id, "new"), distance: 15 };
+  const h = addCircle(emptySketch(), 0, 0, 1.25);
+  const hs = makeSketch(doc, "XY", 15, h.sketch);
+  const hx = { ...makeExtrude(doc, hs.id, "cut"), distance: -12 };
+  doc.features.push(s, ex, hs, hx);
+  const names = [...(await evaluate(doc)).body!.names.values()];
+  return { doc, hole: names.find((n) => n.startsWith(`${hx.id}:side:${h.ids[0]}`))! };
+}
+
+describe("insert seats", () => {
+  it("widens a blind hole from its opening to the insert size", async () => {
+    const { doc, hole } = await blind();
+    const { r, removed, error } = await run(doc, makeInsert(doc, [hole]));
+    expect(error).toBeUndefined();
+    // M3: Ø 4 × 5.7 deep, minus the Ø 2.5 pilot already there.
+    expect(removed).toBeCloseTo(Math.PI * (2 * 2 - 1.25 * 1.25) * 5.7, 0);
+    expect([...r.body!.names.values()].some((n) => n.includes(":seat:"))).toBe(true);
+  });
+
+  it("takes the upper opening of a through hole, or the lower one flipped", async () => {
+    const { doc, vertical } = await block(); // Ø 6 through, z 0..20
+    const f = { ...makeInsert(doc, [vertical]), size: "custom" as const, diameter: 8, depth: 5 };
+    const top = await run(doc, f);
+    const bottom = await run(doc, { ...f, flip: true });
+    expect(top.error).toBeUndefined();
+    expect(top.removed).toBeCloseTo(Math.PI * (16 - 9) * 5, 0);
+    expect(bottom.removed).toBeCloseTo(top.removed, 1);
+    const zTop = Math.max(...[...top.r.body!.shape.faces].filter((x) => x.geomType === "CYLINDRE" && Math.abs(x.center.x - 12) < 1e-3 && x.center.z > 10).map((x) => x.center.z));
+    expect(zTop).toBeCloseTo(17.5, 1);
+    expect([...bottom.r.body!.shape.faces].some((x) => x.geomType === "CYLINDRE" && Math.abs(x.center.x - 12) < 1e-3 && Math.abs(x.center.z - 2.5) < 0.1)).toBe(true);
+  });
+
+  it("refuses pins, and holes already wider than the seat", async () => {
+    const { doc, vertical } = await block();
+    expect((await run(doc, { ...makeInsert(doc, [vertical]), size: "custom", diameter: 5 })).error).toMatch(/already wider/);
+    const pin: Document = { variables: [], features: [] };
+    const s = makeSketch(pin, "XY", 0, addCircle(emptySketch(), 0, 0, 5).sketch);
+    const ex = { ...makeExtrude(pin, s.id, "new"), distance: 10 };
+    pin.features.push(s, ex);
+    const side = [...(await evaluate(pin)).body!.names.values()].find((n) => n.includes(":side:"))!;
+    expect((await run(pin, makeInsert(pin, [side]))).error).toMatch(/pin/);
+  });
+
+  it("round-trips through the file format", () => {
+    const doc: Document = { variables: [], features: [] };
+    const parsed = validateDocument(JSON.parse(JSON.stringify({ ...doc, features: [makeInsert(doc, ["a"])] })));
+    expect(parsed.features[0]).toMatchObject({ type: "insert", size: "M3", diameter: 4, depth: 5.7, flip: false });
   });
 });
