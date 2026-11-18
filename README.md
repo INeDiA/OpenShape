@@ -80,7 +80,7 @@ Stampa 3D (ordine indicativo, le più utili prima):
 29. ~~Analisi degli sbalzi~~: facce oltre il limite (45° dalla verticale, regolabile) colorate in rosso nella vista, con l'area da supportare; esclusa la base sul piatto
 30. ~~Appoggia sulla faccia~~ (Lay flat): il corpo ruota per appoggiare la faccia piana scelta sul piatto (z = 0), con avviso se la faccia non può toccarlo
 31. ~~Profilo stampante~~: piatto, ugello, pareti, riempimento, materiale, densità e prezzo (preferenza del browser); piatto e volume di stampa nella scena con avviso se il pezzo non ci sta; peso e costo stimati nelle misure del corpo
-32. Fori a goccia (teardrop) per fori orizzontali senza supporti e compensazione dei fori
+32. ~~Fori a goccia e compensazione dei fori~~: tetto a 45° (a punta o piatto) sui fori orizzontali, fori allargati di un valore scelto
 33. Export per corpo: un file per corpo o 3MF con oggetti separati, qualità della mesh regolabile
 34. Sedi per inserti filettati a caldo (M2–M5) già dimensionate
 35. Controllo dello spessore minimo delle pareti (sotto 2 × ugello)

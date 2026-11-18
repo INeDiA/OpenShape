@@ -77,6 +77,8 @@ interface Drag {
  */
 export interface ContextActions {
   face?: Command[];
+  /** Cylindrical faces only (holes). */
+  cylinder?: Command[];
   faces?: Command[];
   edge?: Command[];
   body?: Command[];
@@ -700,7 +702,8 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
           <Icon name="shell" /> Shell
         </button>,
       );
-      extra(singlePlanarFace ? "face" : "faces");
+      if (live.faces.every((n) => mesh.faceCylindrical?.[mesh.faceNames.indexOf(n)])) extra("cylinder");
+      else extra(singlePlanarFace ? "face" : "faces");
       if (singlePlanarFace) buttons.push(<span key="hint" className="ov-hint">drag the arrow to push/pull</span>);
     } else if (live.edges.length && !live.edges.some((e) => edgeFrame(mesh, e))) {
       anchor = edgeAnchor(mesh, live.edges[0])?.p ?? null;

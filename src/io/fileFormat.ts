@@ -146,6 +146,12 @@ export function validateDocument(raw: unknown): Document {
         }
         planeIds.add(f.id as string);
         break;
+      case "teardrop":
+      case "holefit":
+        need(Array.isArray(f.faces) && f.faces.every((x) => typeof x === "string"), `${at}.faces must be a list of names`);
+        if (f.type === "teardrop") need(typeof f.flat === "boolean", `${at}.flat must be true or false`);
+        else num(f.amount, `${at}.amount`);
+        break;
       case "layflat":
         str(f.face, `${at}.face`);
         break;

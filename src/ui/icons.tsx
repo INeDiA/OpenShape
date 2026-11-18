@@ -39,6 +39,8 @@ const PATHS = {
   inspect: `${circle(10, 10, 6)}M14.5 14.5 21 21`,
   measure: "M3 17L17 3l4 4L7 21zM7 13l2 2M10 10l2 2M13 7l2 2",
   close: "M6 6l12 12M18 6L6 18",
+  teardrop: "M12 3l6 6a8.5 8.5 0 1 1-12 0z",
+  holefit: `${circle(12, 12, 5)}${circle(12, 12, 8.5)}M12 1.5v3M12 19.5v3`,
   search: `${circle(10.5, 10.5, 6.5)}M15.5 15.5 21 21`,
 } as const;
 
@@ -82,5 +84,7 @@ export const FEATURE_ICON = {
   pattern: "pattern",
   transform: "move",
   layflat: "layflat",
+  teardrop: "teardrop",
+  holefit: "holefit",
   import: "import",
 } as const satisfies Record<string, IconName>;

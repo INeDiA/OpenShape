@@ -333,6 +333,27 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
         </>
       )}
 
+      {(f.type === "teardrop" || f.type === "holefit") && (
+        <>
+          {f.type === "holefit" ? (
+            <Field label="Widen by (mm)" feature={f} field="amount" scope={scope} min={0.001} onChange={onChange} />
+          ) : (
+            <Check label="Flat top (short bridge)" checked={f.flat} onChange={(flat) => onChange({ flat })} />
+          )}
+          <p>
+            <strong>
+              {f.faces.length} hole{f.faces.length === 1 ? "" : "s"}
+            </strong>
+          </p>
+          <p className="muted">
+            {f.type === "holefit"
+              ? "Adds this much to each hole's radius: 0.1–0.2 mm is typical for FDM. Pins can't be shrunk this way."
+              : "Horizontal holes get a 45° roof (Z up), so they print without supports; vertical holes don't need it."}{" "}
+            Click holes in the viewport to add or remove them.
+          </p>
+        </>
+      )}
+
       {f.type === "layflat" && (
         <p className="muted">
           Face <code title={f.face}>{shortName(f.face)}</code> lies on the bed (z = 0), facing down: the print orientation. Click another planar face to change it; turn on ⚠ Overhangs to compare.

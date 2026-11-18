@@ -1,4 +1,4 @@
-import type { BooleanOp, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, PlaneName, ImportFeature, MirrorFeature, PatternFeature, PushPullFeature, RevolveFeature, ShellFeature, SketchFeature, CoveFeature, SweepFeature, LoftFeature, DraftFeature, BooleanFeature, BodyId, LayFlatFeature, PlaneFeature } from "./types";
+import type { BooleanOp, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, PlaneName, ImportFeature, MirrorFeature, PatternFeature, PushPullFeature, RevolveFeature, ShellFeature, SketchFeature, CoveFeature, SweepFeature, LoftFeature, DraftFeature, BooleanFeature, BodyId, LayFlatFeature, PlaneFeature, TeardropFeature, HoleFitFeature } from "./types";
 import { emptySketch, type SketchData } from "../sketch/model";
 import { addCircle, addConstraint, addRectangle } from "../sketch/builders";
 
@@ -69,6 +69,14 @@ export function makePlane(doc: Document, init: Partial<PlaneFeature> = {}): Plan
 
 export function makeSketchOnPlane(doc: Document, planeId: string): SketchFeature {
   return { ...makeSketch(doc, "XY", 0), planeId };
+}
+
+export function makeTeardrop(doc: Document, faces: string[]): TeardropFeature {
+  return { type: "teardrop", id: newId("td"), name: nextName(doc, "Teardrop"), suppressed: false, faces, flat: false };
+}
+
+export function makeHoleFit(doc: Document, faces: string[], amount = 0.15): HoleFitFeature {
+  return { type: "holefit", id: newId("hf"), name: nextName(doc, "Hole fit"), suppressed: false, faces, amount };
 }
 
 export function makeLayFlat(doc: Document, face: string): LayFlatFeature {

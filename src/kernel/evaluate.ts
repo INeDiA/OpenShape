@@ -45,6 +45,7 @@ import { treatEdges } from "./edgeTreatment";
 import { blendCorners, mixedRadiusCorners } from "./vertexBlend";
 import { loftThrough, sweepAlong } from "./sweepLoft";
 import { draftFaces } from "./draft";
+import { cylinderOf, holeFitTool, teardropTool } from "./holes";
 import { sketchPath, type SketchPath } from "../sketch/path";
 import { loopArea } from "../sketch/profiles";
 
@@ -763,6 +764,29 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
       return;
     }
 
+    case "teardrop":
+    case "holefit": {
+      if (!f.faces.length) throw new Error("Select the hole faces");
+      if (f.type === "holefit" && f.amount <= 0) throw new Error("The amount must be > 0");
+      const owner = bodies.withFace(f.faces[0]);
+      const holes = f.faces.map((name) => ({ name, c: cylinderOf(owner.shape.shape, faceByName(owner.shape, name)) }));
+      const tools = holes.map(({ c }) => (f.type === "teardrop" ? teardropTool(c, f.flat) : holeFitTool(c, f.amount)));
+      const shape = cutShapes(owner.shape.shape, tools);
+      // New faces are named after the hole they belong to (the nearest axis).
+      const names = transferNames(shape, [owner.shape], (_face, sample) => {
+        let best = holes[0].name, bestD = Infinity;
+        for (const { name, c } of holes) {
+          const d = [sample.p[0] - c.start[0], sample.p[1] - c.start[1], sample.p[2] - c.start[2]];
+          const t = d[0] * c.axis[0] + d[1] * c.axis[1] + d[2] * c.axis[2];
+          const off = Math.hypot(d[0] - t * c.axis[0], d[1] - t * c.axis[1], d[2] - t * c.axis[2]);
+          if (off < bestD) [best, bestD] = [name, off];
+        }
+        return `${f.id}:${f.type === "teardrop" ? "roof" : "hole"}:${best}`;
+      });
+      bodies.set(owner.id, { shape, names });
+      return;
+    }
+
     case "layflat": {
       const owner = bodies.withFace(f.face);
       const { point, normal } = planarFaceFrame(owner.shape, f.face, 0);
@@ -813,6 +837,7 @@ export function meshBody(body: NamedShape, faceBody: Map<number, BodyId> = new M
     faceGroups: m.faceGroups,
     faceNames: m.faceGroups.map((g) => body.names.get(g.faceId) ?? "?"),
     facePlanar: m.faceGroups.map((g) => types.get(g.faceId) === "PLANE"),
+    faceCylindrical: m.faceGroups.map((g) => types.get(g.faceId) === "CYLINDRE"),
     faceBody: m.faceGroups.map((g) => faceBody.get(g.faceId) ?? ""),
     edges: new Float32Array(e.lines),
     edgeGroups: e.edgeGroups,

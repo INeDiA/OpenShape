@@ -197,6 +197,22 @@ export interface PlanePreview {
   size: number;
 }
 
+/** 3D printing: a 45° roof over horizontal holes, so they print without supports. */
+export interface TeardropFeature extends FeatureBase {
+  type: "teardrop";
+  /** Cylindrical hole faces. */
+  faces: string[];
+  /** Cut the roof flat at the top of the hole (a short bridge) instead of a point. */
+  flat: boolean;
+}
+
+/** 3D printing: enlarges holes by `amount` (radius, mm), as printed holes come out small. */
+export interface HoleFitFeature extends FeatureBase {
+  type: "holefit";
+  faces: string[];
+  amount: number;
+}
+
 /** 3D printing: turns the body so a planar face lies on the bed (z = 0, facing down). */
 export interface LayFlatFeature extends FeatureBase {
   type: "layflat";
@@ -245,6 +261,8 @@ export type Feature =
   | BooleanFeature
   | LayFlatFeature
   | PlaneFeature
+  | TeardropFeature
+  | HoleFitFeature
   | ImportFeature;
 
 export interface Variable {
@@ -334,6 +352,8 @@ export interface MeshData {
   faceNames: string[];
   /** Whether each face is planar (sketch on face, push/pull). */
   facePlanar: boolean[];
+  /** Whether each face is a cylinder (holes, pins). */
+  faceCylindrical?: boolean[];
   /** Body each face belongs to. */
   faceBody: BodyId[];
   edges: Float32Array;
