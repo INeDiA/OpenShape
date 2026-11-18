@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Feature, FeatureStatus } from "../model/types";
+import { FEATURE_ICON, Icon } from "./icons";
 
 interface Props {
   features: Feature[];
@@ -15,26 +16,7 @@ interface Props {
   onDeleteErrors: (ids: string[]) => void;
 }
 
-const ICON: Record<Feature["type"], string> = {
-  sketch: "✎",
-  extrude: "⬆",
-  revolve: "↻",
-  sweep: "➰",
-  loft: "⏢",
-  draft: "⏥",
-  boolean: "⊕",
-  layflat: "⤓",
-  plane: "◱",
-  fillet: "◜",
-  chamfer: "◸",
-  cove: "◟",
-  pushpull: "⇕",
-  shell: "▢",
-  mirror: "⇋",
-  pattern: "⁘",
-  transform: "✥",
-  import: "⇩",
-};
+
 
 export function HistoryPanel({ features, status, selectedId, onSelect, onEdit, onToggle, onDelete, onMove, onDeleteErrors }: Props) {
   const [dragId, setDragId] = useState<string | null>(null);
@@ -115,7 +97,7 @@ export function HistoryPanel({ features, status, selectedId, onSelect, onEdit, o
               onDoubleClick={() => onEdit(f.id)}
               title={st?.error ?? "Drag to reorder"}
             >
-              <span className="icon">{ICON[f.type]}</span>
+              <Icon name={FEATURE_ICON[f.type]} size={15} className="hist-icon" />
               <span className="name">{f.name}</span>
               {st && !st.ok && <span className="badge">!</span>}
               <button

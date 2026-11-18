@@ -15,6 +15,8 @@ import { bodyBounds, bodyContaining, covePreview, edgeAnchor, edgeFrame, faceAnc
 import { extrudeSweep, revolveSweep } from "../viewport/sweep";
 import type { DragPhase, Handle, Overlay } from "../viewport/Viewport";
 import { ExprInput } from "./ExprInput";
+import { Icon } from "./icons";
+import type { Command } from "./ToolMenus";
 
 export interface Selection {
   faces: string[];
@@ -36,6 +38,11 @@ interface Params {
   onSketchOnFace: (face: string) => void;
   onAddFeature: (f: Feature) => void;
   bodyName: (id: BodyId) => string;
+  /**
+   * More actions offered next to a selection of faces, edges or a body (the
+   * toolbar's commands). A getter, read again on click so the action uses the latest document.
+   */
+  contextActions?: () => ContextActions;
   /** Sketch previews from the kernel: frames and regions for region extrusion. */
   sketches: SketchPreview[];
 }
@@ -61,6 +68,18 @@ interface Drag {
   blendFace?: string;
   /** For a new region extrusion: the point on the sketch plane the operation is judged from. */
   regionBase?: Vec3;
+}
+
+/**
+ * Commands offered next to a selection: one planar face, several faces, edges,
+ * a body. Shown whenever that kind of selection is made; whether a command can
+ * run is checked again on click, with the latest document.
+ */
+export interface ContextActions {
+  face?: Command[];
+  faces?: Command[];
+  edge?: Command[];
+  body?: Command[];
 }
 
 /** A line the revolve axis can be: a sketch line or a world axis. */
@@ -98,7 +117,7 @@ export function transformMatrix(t: TransformFeature): THREE.Matrix4 {
 /** 1 mm steps, 5° for rotations. */
 const snap = (v: number, step: number) => Math.round(v / step) * step;
 
-export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnFace, onAddFeature, bodyName, sketches }: Params) {
+export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnFace, onAddFeature, bodyName, sketches, contextActions }: Params) {
   const [selection, setSelection] = useState<Selection>(EMPTY);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -599,6 +618,17 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
 
     const buttons: ReactNode[] = [];
     let anchor: Vec3 | null = null;
+    /** Toolbar commands that apply to this selection, as buttons in the menu. */
+    const extra = (kind: keyof ContextActions) => {
+      for (const c of contextActions?.()[kind] ?? []) {
+        const run = () => contextActions?.()[kind]?.find((x) => x.id === c.id && !x.disabled)?.run();
+        buttons.push(
+          <button key={`x-${c.id}`} title={c.title} onClick={run}>
+            {c.icon && <Icon name={c.icon} />} {c.label}
+          </button>,
+        );
+      }
+    };
     if (regionSpot) {
       anchor = regionSpot.p;
       const sk = regionSpot.sketch;
@@ -618,12 +648,12 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
             add({ ...makeExtrude(doc, sk.id, op), regions, distance: 10, target });
           }}
         >
-          ⬆ Extrude
+          <Icon name="extrude" /> Extrude
         </button>,
       );
       buttons.push(
         <button key="rv" onClick={() => startRevolve(sk.id, regions)} title="Revolve around an axis you pick next">
-          ↻ Revolve
+          <Icon name="revolve" /> Revolve
         </button>,
       );
       buttons.push(<span key="h" className="ov-hint">drag the arrow · into the solid cuts</span>);
@@ -659,14 +689,19 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     } else if (live.faces.length) {
       anchor = faceAnchor(mesh, live.faces[0])?.p ?? null;
       if (singlePlanarFace) {
-        buttons.push(<button key="sk" onClick={() => onSketchOnFace(singlePlanarFace)}>✎ Sketch</button>);
-        buttons.push(<span key="hint" className="ov-hint">drag the arrow to push/pull</span>);
+        buttons.push(
+          <button key="sk" onClick={() => onSketchOnFace(singlePlanarFace)}>
+            <Icon name="sketch" /> Sketch
+          </button>,
+        );
       }
       buttons.push(
         <button key="sh" onClick={() => (onAddFeature(makeShell(doc, live.faces)), clear())}>
-          ▢ Shell
+          <Icon name="shell" /> Shell
         </button>,
       );
+      extra(singlePlanarFace ? "face" : "faces");
+      if (singlePlanarFace) buttons.push(<span key="hint" className="ov-hint">drag the arrow to push/pull</span>);
     } else if (live.edges.length && !live.edges.some((e) => edgeFrame(mesh, e))) {
       anchor = edgeAnchor(mesh, live.edges[0])?.p ?? null;
       buttons.push(<span key="s" className="ov-hint">smooth edge · nothing to fillet here</span>);
@@ -683,7 +718,7 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
               setSelection(EMPTY);
             }}
           >
-            {type === "fillet" ? "◜ Fillet" : "◸ Chamfer"}
+            <Icon name={type} /> {type === "fillet" ? "Fillet" : "Chamfer"}
           </button>,
         );
       }
@@ -698,13 +733,16 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
             setSelection(EMPTY);
           }}
         >
-          ◟ Cove
+          <Icon name="cove" /> Cove
         </button>,
       );
+      extra("edge");
       buttons.push(<span key="n" className="ov-hint">{live.edges.length} edge{live.edges.length > 1 ? "s" : ""} · drag the arrow</span>);
     } else if (live.body) {
       anchor = bodyBounds(mesh, live.body)?.center ?? null;
-      buttons.push(<span key="b" className="ov-hint">{bodyName(live.body)} · drag arrows to move, ring to rotate</span>);
+      buttons.push(<strong key="t" className="ov-title">{bodyName(live.body)}</strong>);
+      extra("body");
+      buttons.push(<span key="b" className="ov-hint">drag arrows to move, ring to rotate</span>);
     }
     return anchor && buttons.length ? { anchor, content: <div className="ov-menu">{buttons}</div> } : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -885,7 +923,7 @@ function ActiveEditor({ feature: f, scope, doc, commit, onDone }: { feature: Fea
         <>
           {field("size", f.type === "fillet" ? "Radius" : "Distance", 0.01)}
           <button onClick={() => set({ type: f.type === "fillet" ? "chamfer" : "fillet", name: f.name.replace(/^(Fillet|Chamfer)/, f.type === "fillet" ? "Chamfer" : "Fillet") } as Partial<Feature>)}>
-            {f.type === "fillet" ? "◸ Chamfer" : "◜ Fillet"}
+            <Icon name={f.type === "fillet" ? "chamfer" : "fillet"} /> {f.type === "fillet" ? "Chamfer" : "Fillet"}
           </button>
         </>
       )}

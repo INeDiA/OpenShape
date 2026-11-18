@@ -5,6 +5,7 @@ import {
   hasBody,
   lastSketch,
   makeBoolean,
+  makeCove,
   makeDraft,
   makeEdgeTreatment,
   makeExtrude,
@@ -32,7 +33,7 @@ import { loadSolver, solve, solverReady } from "./sketch/solver";
 import { resolveDocument, type SketchSolver } from "./model/resolve";
 import { VariablesPanel } from "./ui/VariablesPanel";
 import { DrawingWorkspace } from "./drawing/DrawingWorkspace";
-import { useManipulation } from "./ui/useManipulation";
+import { useManipulation, type ContextActions } from "./ui/useManipulation";
 import { EXPORT_FORMATS, exportMesh, type ExportFormat } from "./io/exporters";
 import type { FileMeta } from "./io/fileFormat";
 import { downloadBlob, GENERATOR, autosaveProblem, loadAutosave, loadHistory, openDocument, resetFileHandle, saveDocument, writeAutosave, writeHistory } from "./io/storage";
@@ -53,6 +54,9 @@ const solveSketch: SketchSolver = (s) => {
 import { HistoryPanel } from "./ui/HistoryPanel";
 import { moveFeature, removeFeatures } from "./model/history";
 import { PropertiesPanel } from "./ui/PropertiesPanel";
+import { ToolMenus, type Command, type MenuGroup } from "./ui/ToolMenus";
+import { Icon } from "./ui/icons";
+import { CommandPalette } from "./ui/CommandPalette";
 import { MeasurePanel } from "./ui/MeasurePanel";
 import { regionKey, Viewport, type HoverInfo } from "./viewport/Viewport";
 
@@ -173,7 +177,10 @@ export function App() {
   const rollbackId = pickingFeature?.id ?? faceFeature?.id;
 
 
+  // Toolbar commands offered next to the selection (filled in once the menus are built, below).
+  const contextRef = useRef<ContextActions>({});
   const manip = useManipulation({
+    contextActions: () => contextRef.current,
     doc,
     mesh,
     scope: resolution.scope,
@@ -304,6 +311,18 @@ export function App() {
 
   // Model (3D) or the 2D drawing sheet.
   const [mode, setMode] = useState<"model" | "drawing">("model");
+  // Command palette (⌘K).
+  const [palette, setPalette] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPalette((p) => !p);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const add = (f: Feature) => {
     commit({ ...doc, features: [...doc.features, f] });
@@ -525,172 +544,203 @@ export function App() {
   });
 
 
+  // ---- toolbar menus ------------------------------------------------------------
+  const fileMenus: MenuGroup[] = [
+    {
+      id: "file",
+      label: "File",
+      icon: "menu",
+      items: [
+        { id: "new", label: "New", icon: "new", run: newDocument },
+        { id: "open", label: "Open…", icon: "open", shortcut: "⌘O", run: open },
+        { id: "save", label: "Save", icon: "save", shortcut: "⌘S", run: () => save(false) },
+        { id: "saveas", label: "Save as…", icon: "saveAs", shortcut: "⇧⌘S", run: () => save(true) },
+        "separator",
+        { id: "import", label: "Import STEP or STL…", icon: "import", run: importFile },
+        { heading: "Export" },
+        ...EXPORT_FORMATS.map((f) => ({
+          id: `export-${f.id}`,
+          label: `${f.label}`,
+          icon: "export" as const,
+          title: f.hint,
+          disabled: kernelState !== "ready" || !mesh,
+          run: () => exportAs(f.id as ExportFormat),
+        })),
+      ],
+    },
+  ];
+  const modeling = mode === "model";
+  const toolMenus: MenuGroup[] = [
+    {
+      id: "sketch",
+      label: "Sketch",
+      icon: "sketch",
+      hidden: !modeling,
+      items: [
+        {
+          id: "sketch",
+          label: selectedPlane ? "Sketch on plane" : singlePlanarFace ? "Sketch on face" : `Sketch on ${newSketchPlane}`,
+          icon: "sketch",
+          disabled: solverState !== "ready" || !!editingSketch,
+          title: "New sketch: on the selected construction plane or planar face, else on the plane chosen below",
+          run: newSketch,
+        },
+        { heading: "Plane for new sketches" },
+        ...(["XY", "XZ", "YZ"] as PlaneName[]).map((p) => ({
+          id: `plane-${p}`,
+          label: p === "XY" ? "XY (top)" : p === "XZ" ? "XZ (front)" : "YZ (right)",
+          checked: newSketchPlane === p,
+          disabled: !!editingSketch,
+          run: () => setNewSketchPlane(p),
+        })),
+      ],
+    },
+    {
+      id: "create",
+      label: "Create",
+      icon: "extrude",
+      hidden: !modeling || !!editingSketch,
+      items: [
+        { id: "extrude", label: "Extrude", icon: "extrude", disabled: !baseSketch, title: "Extrude the selected (or latest) sketch", run: () => add(makeExtrude(doc, baseSketch!.id, hasBody(doc) ? "join" : "new")) },
+        { id: "revolve", label: "Revolve", icon: "revolve", disabled: !baseSketch, title: "Revolve the sketch: pick the axis next", run: () => (setSelectedId(null), manip.startRevolve(baseSketch!.id)) },
+        {
+          id: "sweep",
+          label: "Sweep",
+          icon: "sweep",
+          disabled: !sweepPair,
+          title: sweepPair ? "Move a sketch profile along the path drawn in another sketch" : "Needs a sketch with a closed profile and another one with a path (a chain of curves)",
+          run: () => add(makeSweep(doc, sweepPair!.profile, sweepPair!.path, hasBody(doc) ? "join" : "new")),
+        },
+        {
+          id: "loft",
+          label: "Loft",
+          icon: "loft",
+          disabled: loftSections.length < 2,
+          title: loftSections.length < 2 ? "Needs two or more sketches with closed profiles" : "A solid through the closed profiles of several sketches",
+          run: () => add(makeLoft(doc, loftSections, hasBody(doc) ? "join" : "new")),
+        },
+      ],
+    },
+    {
+      id: "modify",
+      label: "Modify",
+      icon: "pushpull",
+      hidden: !modeling || !!editingSketch,
+      items: [
+        { id: "fillet", label: "Fillet", icon: "fillet", disabled: !hasBody(doc), title: "Round edges (click them next, or select them first)", run: () => add({ ...makeEdgeTreatment(doc, "fillet"), edges: sel.edges }) },
+        { id: "chamfer", label: "Chamfer", icon: "chamfer", disabled: !hasBody(doc), title: "Bevel edges", run: () => add({ ...makeEdgeTreatment(doc, "chamfer"), edges: sel.edges }) },
+        { id: "cove", label: "Cove", icon: "cove", disabled: !sel.edges.length, title: sel.edges.length ? "Concave quarter-round groove on the selected edges" : "Select straight or circular edges first", run: () => (add(makeCove(doc, sel.edges)), manip.clear()) },
+        "separator",
+        { id: "pushpull", label: "Push/Pull", icon: "pushpull", disabled: !singlePlanarFace, title: singlePlanarFace ? "Move the selected planar face along its normal" : "Select one planar face first", run: () => (add(makePushPull(doc, singlePlanarFace!)), manip.clear()) },
+        { id: "shell", label: "Shell", icon: "shell", disabled: !hasBody(doc), title: "Hollow the body; selected faces become openings", run: () => (add(makeShell(doc, liveFaces)), manip.clear()) },
+        { id: "draft", label: "Draft", icon: "draft", disabled: !hasBody(doc), title: "Tilt faces by an angle (moulded parts): pick the neutral face, then the faces", run: () => (add(makeDraft(doc, liveFaces)), setRepickNeutral(false), manip.clear()) },
+      ],
+    },
+    {
+      id: "combine",
+      label: "Combine",
+      icon: "boolean",
+      hidden: !modeling || !!editingSketch,
+      items: [
+        {
+          id: "boolean",
+          label: "Boolean",
+          icon: "boolean",
+          disabled: bodyList.length < 2,
+          title: bodyList.length < 2 ? "Needs two or more bodies" : "Join, subtract or intersect bodies: pick the target, then the others",
+          run: () => (add(makeBoolean(doc, sel.body ?? "")), manip.clear()),
+        },
+        { id: "mirror", label: "Mirror", icon: "mirror", disabled: !hasBody(doc), title: "Mirror the body across a plane", run: () => add(makeMirror(doc)) },
+        { id: "pattern", label: "Pattern", icon: "pattern", disabled: !hasBody(doc), title: "Repeat the body (linear or circular)", run: () => add(makePattern(doc)) },
+      ],
+    },
+    {
+      id: "construct",
+      label: "Construct",
+      icon: "plane",
+      hidden: !modeling || !!editingSketch,
+      items: [
+        {
+          id: "plane",
+          label: "Plane",
+          icon: "plane",
+          title: "From the selection: a planar face (offset), two parallel faces (midplane), a face and an edge (angle), an edge (normal), or nothing (offset from the sketch plane)",
+          run: () => {
+            const faces = sel.faces.filter((n) => faceInfo.get(n));
+            const init =
+              faces.length >= 2
+                ? { mode: "midplane" as const, face: faces[0], face2: faces[1] }
+                : faces.length === 1 && sel.edges.length
+                  ? { mode: "angle" as const, face: faces[0], edge: sel.edges[0] }
+                  : faces.length === 1
+                    ? { mode: "offset" as const, face: faces[0] }
+                    : sel.edges.length
+                      ? { mode: "normal" as const, edge: sel.edges[0], position: 0.5 }
+                      : { mode: "offset" as const, base: newSketchPlane };
+            add(makePlane(doc, init));
+            manip.clear();
+          },
+        },
+      ],
+    },
+    {
+      id: "print",
+      label: "Print",
+      icon: "print",
+      hidden: !modeling || !!editingSketch,
+      items: [
+        { id: "layflat", label: "Lay flat", icon: "layflat", disabled: !singlePlanarFace, title: singlePlanarFace ? "Turn the body so the selected planar face lies on the bed" : "Select one planar face first", run: () => (add(makeLayFlat(doc, singlePlanarFace!)), manip.clear()) },
+        { heading: "Overhangs: Inspect, top right of the view" },
+      ],
+    },
+  ];
+  const commandById = (id: string) => toolMenus.flatMap((g) => g.items).find((i): i is Command => typeof i === "object" && "run" in i && i.id === id);
+  const pick = (...ids: string[]) => ids.map(commandById).filter((c): c is Command => !!c);
+  contextRef.current = {
+    face: pick("plane", "layflat", "draft"),
+    faces: pick("plane"),
+    edge: pick("plane"),
+    body: bodyList.length > 1 ? pick("boolean", "mirror", "pattern") : pick("mirror", "pattern"),
+  };
+
   return (
     <div className={`app${kernelState === "ready" && computingFor !== null ? " computing" : ""}`}>
       <header className="toolbar">
         <strong className="brand">OpenShape</strong>
-        <div className="group file-group">
-          <button onClick={newDocument} title="New document">New</button>
-          <button onClick={open} title="Open (⌘O)">Open</button>
-          <button onClick={() => save(false)} title="Save (⌘S)">Save</button>
-          <button onClick={() => save(true)} title="Save as (⇧⌘S)">Save as</button>
-          <span className="doc-name" title={dirty ? "Unsaved changes (autosaved in this browser)" : "Saved"}>
-            {baseName(fileName)}
-            {dirty && <span className="dirty">•</span>}
-          </span>
-        </div>
+        <ToolMenus groups={fileMenus} />
         <div className="group mode-switch">
           <button className={mode === "model" ? "active" : ""} onClick={() => setMode("model")} title="Model the part in 3D">
-            ◧ Model
+            <Icon name="model" /> Model
           </button>
           <button className={mode === "drawing" ? "active" : ""} disabled={!!editingSketch} onClick={() => (setMode("drawing"), manip.clear())} title="2D technical drawing of the model: views, dimensions, PDF/DXF export">
-            📐 Drawing
+            <Icon name="drawing" /> Drawing
           </button>
         </div>
-        <div className={`group${mode === "drawing" ? " hidden" : ""}`}>
-          <button
-            disabled={solverState !== "ready" || !!editingSketch}
-            onClick={newSketch}
-            title={selectedPlane ? "New sketch on the selected construction plane" : singlePlanarFace ? "New sketch on the selected face" : "New sketch on the chosen plane (select a planar face or a construction plane to sketch on it)"}
-          >
-            {selectedPlane ? "✎ Sketch on plane" : singlePlanarFace ? "✎ Sketch on face" : "✎ Sketch"}
-          </button>
-          <select value={newSketchPlane} onChange={(e) => setNewSketchPlane(e.target.value as PlaneName)} disabled={!!editingSketch || !!singlePlanarFace || !!selectedPlane} title="Sketch plane">
-            <option value="XY">XY (top)</option>
-            <option value="XZ">XZ (front)</option>
-            <option value="YZ">YZ (right)</option>
-          </select>
-        </div>
-        <div className={`group${editingSketch || mode === "drawing" ? " hidden" : ""}`}>
-          <button disabled={!baseSketch} onClick={() => add(makeExtrude(doc, baseSketch!.id, hasBody(doc) ? "join" : "new"))}>
-            ⬆ Extrude
-          </button>
-          <button disabled={!baseSketch} onClick={() => (setSelectedId(null), manip.startRevolve(baseSketch!.id))} title="Revolve the sketch: pick the axis next">
-            ↻ Revolve
-          </button>
-          <button
-            disabled={!sweepPair}
-            title={sweepPair ? "Move a sketch profile along the path drawn in another sketch" : "Needs a sketch with a closed profile and another one with a path (a chain of curves)"}
-            onClick={() => add(makeSweep(doc, sweepPair!.profile, sweepPair!.path, hasBody(doc) ? "join" : "new"))}
-          >
-            ➰ Sweep
-          </button>
-          <button
-            disabled={loftSections.length < 2}
-            title={loftSections.length < 2 ? "Needs two or more sketches with closed profiles" : "A solid through the closed profiles of several sketches"}
-            onClick={() => add(makeLoft(doc, loftSections, hasBody(doc) ? "join" : "new"))}
-          >
-            ⏢ Loft
-          </button>
-          <button disabled={!hasBody(doc)} onClick={() => add(makeEdgeTreatment(doc, "fillet"))}>◜ Fillet</button>
-          <button disabled={!hasBody(doc)} onClick={() => add(makeEdgeTreatment(doc, "chamfer"))}>◸ Chamfer</button>
-        </div>
-        <div className={`group${editingSketch || mode === "drawing" ? " hidden" : ""}`}>
-          <button
-            disabled={!singlePlanarFace}
-            title="Move the selected planar face along its normal"
-            onClick={() => {
-              add(makePushPull(doc, singlePlanarFace!));
-              manip.clear();
-            }}
-          >
-            ⇕ Push/Pull
-          </button>
-          <button
-            title="Construction plane from the selection: a planar face (offset), two parallel faces (midplane), a face and an edge (angle), an edge (normal to it), or nothing (offset from the chosen standard plane)"
-            onClick={() => {
-              const sel = manip.selection;
-              const faces = sel.faces.filter((n) => faceInfo.get(n));
-              const init =
-                faces.length >= 2
-                  ? { mode: "midplane" as const, face: faces[0], face2: faces[1] }
-                  : faces.length === 1 && sel.edges.length
-                    ? { mode: "angle" as const, face: faces[0], edge: sel.edges[0] }
-                    : faces.length === 1
-                      ? { mode: "offset" as const, face: faces[0] }
-                      : sel.edges.length
-                        ? { mode: "normal" as const, edge: sel.edges[0], position: 0.5 }
-                        : { mode: "offset" as const, base: newSketchPlane };
-              add(makePlane(doc, init));
-              manip.clear();
-            }}
-          >
-            ◱ Plane
-          </button>
-          <button
-            disabled={!singlePlanarFace}
-            title="3D printing: turn the body so the selected planar face lies on the bed"
-            onClick={() => {
-              add(makeLayFlat(doc, singlePlanarFace!));
-              manip.clear();
-            }}
-          >
-            ⤓ Lay flat
-          </button>
-          <button
-            disabled={!hasBody(doc)}
-            title="Hollow the body; selected faces become openings"
-            onClick={() => {
-              add(makeShell(doc, liveFaces));
-              manip.clear();
-            }}
-          >
-            ▢ Shell
-          </button>
-          <button
-            disabled={!hasBody(doc)}
-            title="Tilt faces by an angle (for moulded parts): pick the neutral face, then the faces"
-            onClick={() => {
-              add(makeDraft(doc, liveFaces));
-              setRepickNeutral(false);
-              manip.clear();
-            }}
-          >
-            ⏥ Draft
-          </button>
-          <button
-            disabled={bodyList.length < 2}
-            title={bodyList.length < 2 ? "Needs two or more bodies" : "Join, subtract or intersect bodies: pick the target, then the others"}
-            onClick={() => {
-              add(makeBoolean(doc, manip.selection.body ?? ""));
-              manip.clear();
-            }}
-          >
-            ⊕ Boolean
-          </button>
-          <button disabled={!hasBody(doc)} onClick={() => add(makeMirror(doc))} title="Mirror the body across a plane">
-            ⇋ Mirror
-          </button>
-          <button disabled={!hasBody(doc)} onClick={() => add(makePattern(doc))} title="Repeat the body (linear or circular)">
-            ⁘ Pattern
-          </button>
-          <button onClick={importFile} title="Import a STEP or STL file">
-            ⇩ Import
-          </button>
-        </div>
-        <div className="group">
-          <button disabled={!canUndo} onClick={undo} title="⌘Z">↶</button>
-          <button disabled={!canRedo} onClick={redo} title="⇧⌘Z">↷</button>
-        </div>
+        <ToolMenus groups={toolMenus} />
+        <button className="palette-button" onClick={() => setPalette(true)} title="Find a command (⌘K)">
+          <Icon name="search" /> <span className="palette-hint">⌘K</span>
+        </button>
         <div className="group right">
-          <select
-            className="export-select"
-            value=""
-            disabled={kernelState !== "ready" || !mesh}
-            onChange={(e) => e.target.value && exportAs(e.target.value as ExportFormat)}
-            title="Export the current body"
-          >
-            <option value="">Export…</option>
-            {EXPORT_FORMATS.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.label} – {f.hint}
-              </option>
-            ))}
-          </select>
+          <button disabled={!canUndo} onClick={undo} title="Undo (⌘Z)" aria-label="Undo">
+            <Icon name="undo" />
+          </button>
+          <button disabled={!canRedo} onClick={redo} title="Redo (⇧⌘Z)" aria-label="Redo">
+            <Icon name="redo" />
+          </button>
         </div>
       </header>
+      {palette && <CommandPalette groups={[...fileMenus, ...toolMenus]} onClose={() => setPalette(false)} />}
 
       <div className="sidebar">
+      <div className="doc-header">
+        <button className="doc-name" onClick={() => save(true)} title="Rename: save under another name (⇧⌘S)">
+          {baseName(fileName)}
+          {dirty && <span className="dirty">•</span>}
+        </button>
+        <span className="doc-state" title={dirty ? "Not saved to a file yet; the browser keeps an automatic copy" : undefined}>
+          {dirty ? "Unsaved changes" : "Saved"}
+        </span>
+      </div>
       <HistoryPanel
         features={doc.features}
         status={fullStatus}

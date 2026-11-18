@@ -9,6 +9,7 @@ import type { Vec3 } from "../model/frame";
 import { CameraNav, placeSketchCamera, type NavMode, type SketchCamera, type ViewName } from "./navigation";
 import { SectionView, sectionRange, type SectionAxis, type SectionSpec } from "./section";
 import { findOverhangs } from "./overhang";
+import { Icon } from "../ui/icons";
 
 const NAV_MODE_KEY = "openshape.navMode";
 const readNavMode = (): NavMode => {
@@ -1162,6 +1163,8 @@ function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
     return { axis, flip: section?.flip ?? false, offset: Math.round(((lo + hi) / 2) * 10) / 10 };
   };
   const range = section ? sectionRange(state.current?.box ?? null, section.axis) : null;
+  // The Inspect menu (section, overhangs) is open.
+  const [inspect, setInspect] = useState(false);
   // Overhang analysis: limit angle when on, and the area found.
   const [overhang, setOverhang] = useState<number | null>(null);
   const [overhangArea, setOverhangArea] = useState<number | null>(null);
@@ -1208,19 +1211,36 @@ function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
 
   return (
     <div className="view-bar">
-      <button onClick={fit} title="Fit the model (F)">⤢ Fit</button>
+      <button onClick={fit} title="Fit the model (F)">
+        <Icon name="fit" size={15} /> Fit
+      </button>
       {VIEWS.map(([v, label, key]) => (
         <button key={v} onClick={() => view(v)} title={`${label} view (${key})`}>
           {label}
         </button>
       ))}
-      <button
-        className={overhang !== null ? "active" : ""}
-        onClick={() => applyOverhang(overhang === null ? 45 : null)}
-        title="3D printing: show faces that need support (overhangs steeper than the limit, Z up)"
-      >
-        ⚠ Overhangs
-      </button>
+      <span className="inspect-menu">
+        <button className={section || overhang !== null ? "active" : ""} onClick={() => setInspect(!inspect)} aria-expanded={inspect} title="Analysis: section view, overhangs">
+          <Icon name="inspect" size={15} /> Inspect <span className="tm-caret">▾</span>
+        </button>
+        {inspect && (
+          <span className="inspect-list" role="menu">
+            <button role="menuitemcheckbox" aria-checked={!!section} onClick={() => (applySection(section ? null : centreOn("X")), setInspect(false))} title="Cut the model with a plane to see inside">
+              <Icon name="section" size={16} /> <span className="tm-label">Section</span>
+              {section ? "✓" : <span className="tm-shortcut">S</span>}
+            </button>
+            <button
+              role="menuitemcheckbox"
+              aria-checked={overhang !== null}
+              onClick={() => (applyOverhang(overhang === null ? 45 : null), setInspect(false))}
+              title="3D printing: faces that need support (steeper than the limit, Z up)"
+            >
+              <Icon name="overhang" size={16} /> <span className="tm-label">Overhangs</span>
+              {overhang !== null && "✓"}
+            </button>
+          </span>
+        )}
+      </span>
       {overhang !== null && (
         <span className="section-controls">
           <input
@@ -1243,13 +1263,6 @@ function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
           </span>
         </span>
       )}
-      <button
-        className={section ? "active" : ""}
-        onClick={() => applySection(section ? null : centreOn("X"))}
-        title="Section view: cut the model with a plane to see inside (S)"
-      >
-        ◩ Section
-      </button>
       {section && range && (
         <span className="section-controls">
           {(["X", "Y", "Z"] as const).map((a) => (
