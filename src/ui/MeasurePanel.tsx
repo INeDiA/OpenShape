@@ -1,4 +1,5 @@
 import type { Measurement, MeasureRow } from "../model/types";
+import { estimatePrint, fitsBed, type PrinterProfile } from "../print/profile";
 
 const fmt = (r: MeasureRow) => {
   if ("text" in r) return r.text;
@@ -8,17 +9,29 @@ const fmt = (r: MeasureRow) => {
 };
 
 /** Read-out of the measurements of the current model selection. */
-export function MeasurePanel({ measurement, busy }: { measurement: Measurement | null; busy: boolean }) {
+export function MeasurePanel({ measurement, busy, printer }: { measurement: Measurement | null; busy: boolean; printer?: PrinterProfile }) {
   if (!measurement) return busy ? <div className="measure-panel muted">Measuring…</div> : null;
+  // A body: what printing it takes, with the printer profile.
+  const b = measurement.body;
+  const print = b && printer ? estimatePrint(b.volume, b.area, printer) : null;
+  const extra: MeasureRow[] =
+    b && print && printer
+      ? [
+          { label: `Weight (${printer.material}, ${Math.round(printer.infill * 100)}%)`, text: `≈ ${print.grams.toFixed(1)} g · solid ${print.solidGrams.toFixed(1)} g` },
+          { label: "Material cost", text: `≈ ${print.cost.toFixed(2)} €` },
+          { label: "Build volume", text: fitsBed(b.size, printer.bed) ? `fits (${printer.bed.join(" × ")} mm)` : `too big for ${printer.bed.join(" × ")} mm` },
+        ]
+      : [];
+  const rows = [...measurement.rows, ...extra];
   return (
     <div className="measure-panel" aria-live="polite">
       <div className="measure-title">
         <span>📏 {measurement.title}</span>
         {busy && <span className="muted">…</span>}
       </div>
-      {measurement.rows.length === 0 && <div className="muted">Nothing measurable selected</div>}
+      {rows.length === 0 && <div className="muted">Nothing measurable selected</div>}
       <dl>
-        {measurement.rows.map((r) => (
+        {rows.map((r) => (
           <div key={r.label} className="measure-row">
             <dt>{r.label}</dt>
             <dd

@@ -57,6 +57,8 @@ import { PropertiesPanel } from "./ui/PropertiesPanel";
 import { ToolMenus, type Command, type MenuGroup } from "./ui/ToolMenus";
 import { Icon } from "./ui/icons";
 import { CommandPalette } from "./ui/CommandPalette";
+import { fitsBed, loadProfile, saveProfile, type PrinterProfile } from "./print/profile";
+import { PrinterDialog } from "./print/PrinterDialog";
 import { MeasurePanel } from "./ui/MeasurePanel";
 import { regionKey, Viewport, type HoverInfo } from "./viewport/Viewport";
 
@@ -313,6 +315,13 @@ export function App() {
   const [mode, setMode] = useState<"model" | "drawing">("model");
   // Command palette (⌘K).
   const [palette, setPalette] = useState(false);
+  // 3D printing: the printer profile (a browser preference) and its settings dialog.
+  const [printer, setPrinterState] = useState<PrinterProfile>(loadProfile);
+  const setPrinter = (p: PrinterProfile) => {
+    setPrinterState(p);
+    saveProfile(p);
+  };
+  const [printerDialog, setPrinterDialog] = useState(false);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -689,11 +698,26 @@ export function App() {
       icon: "print",
       hidden: !modeling || !!editingSketch,
       items: [
+        { id: "printer", label: "Printer settings…", icon: "print", title: "Build volume, nozzle, material and price", run: () => setPrinterDialog(true) },
+        { id: "showbed", label: "Show the bed", checked: printer.showBed, run: () => setPrinter({ ...printer, showBed: !printer.showBed }) },
+        "separator",
         { id: "layflat", label: "Lay flat", icon: "layflat", disabled: !singlePlanarFace, title: singlePlanarFace ? "Turn the body so the selected planar face lies on the bed" : "Select one planar face first", run: () => (add(makeLayFlat(doc, singlePlanarFace!)), manip.clear()) },
         { heading: "Overhangs: Inspect, top right of the view" },
       ],
     },
   ];
+  // The print bed under the whole model, and whether the model fits the build volume.
+  const bed = useMemo(() => {
+    if (!printer.showBed || !mesh || !mesh.vertices.length) return null;
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < mesh.vertices.length; i += 3)
+      for (let k = 0; k < 3; k++) {
+        lo[k] = Math.min(lo[k], mesh.vertices[i + k]);
+        hi[k] = Math.max(hi[k], mesh.vertices[i + k]);
+      }
+    const size = [0, 1, 2].map((k) => hi[k] - lo[k]) as [number, number, number];
+    return { size: printer.bed, model: size, center: [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2] as [number, number], fits: fitsBed(size, printer.bed) };
+  }, [printer.showBed, printer.bed, mesh]);
   const commandById = (id: string) => toolMenus.flatMap((g) => g.items).find((i): i is Command => typeof i === "object" && "run" in i && i.id === id);
   const pick = (...ids: string[]) => ids.map(commandById).filter((c): c is Command => !!c);
   contextRef.current = {
@@ -729,6 +753,7 @@ export function App() {
           </button>
         </div>
       </header>
+      {printerDialog && <PrinterDialog profile={printer} onChange={setPrinter} onClose={() => setPrinterDialog(false)} />}
       {palette && <CommandPalette groups={[...fileMenus, ...toolMenus]} onClose={() => setPalette(false)} />}
 
       <div className="sidebar">
@@ -819,6 +844,7 @@ export function App() {
           }}
           onEditSketch={(id) => solverState === "ready" && startSketchEdit(id)}
           planes={editingSketch ? [] : planePreviews}
+          bed={editingSketch ? null : bed}
           selectedPlane={selectedPlane}
           onPickPlane={(id) => {
             manip.clear();
@@ -840,7 +866,7 @@ export function App() {
           sketchCamera={editingSketch && sketchView && editingFrame ? { frame: editingFrame, ...sketchView } : null}
           hiddenSketchId={editingSketch?.id ?? null}
         />
-        {measureKey && <MeasurePanel measurement={measurement} busy={measuring} />}
+        {measureKey && <MeasurePanel measurement={measurement} busy={measuring} printer={printer} />}
         {editingSketch && (
           <SketchEditor
             key={editingSketch.id}
@@ -858,6 +884,11 @@ export function App() {
         {pickingFeature && (
           <div className="overlay picking-banner">
             Click edges to {pickingFeature.type} · showing the model before <strong>{pickingFeature.name}</strong>
+          </div>
+        )}
+        {bed && !bed.fits && !editingSketch && (
+          <div className="overlay bed-warning" role="status">
+            The model ({bed.model.map((v) => Math.round(v)).join(" × ")} mm) doesn't fit the build volume ({bed.size.join(" × ")} mm)
           </div>
         )}
         {faceFeature && (

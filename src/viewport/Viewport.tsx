@@ -86,6 +86,8 @@ interface Props {
   onPickRegion?: (sketchId: string, regionId: string, additive: boolean) => void;
   /** Double click on a sketch region opens the sketch. */
   onEditSketch?: (sketchId: string) => void;
+  /** 3D printing: the build plate under the model (centred under it, at z = 0), red when the model doesn't fit. */
+  bed?: { size: [number, number, number]; center: [number, number]; fits: boolean } | null;
   /** Construction planes, drawn translucent; a click selects one. */
   planes?: PlanePreview[];
   selectedPlane?: string | null;
@@ -117,6 +119,11 @@ const PLANE = new THREE.MeshBasicMaterial({ color: 0x6b8aff, transparent: true, 
 const PLANE_SEL = new THREE.MeshBasicMaterial({ color: 0x2f6fed, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide });
 const PLANE_EDGE = new THREE.LineBasicMaterial({ color: 0x6b8aff });
 const PLANE_EDGE_SEL = new THREE.LineBasicMaterial({ color: 0x2f6fed });
+// Print bed and build volume.
+const BED = new THREE.MeshBasicMaterial({ color: 0x9aa7b8, transparent: true, opacity: 0.18, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+const BED_EDGE = new THREE.LineBasicMaterial({ color: 0x6b7a90 });
+const BED_EDGE_BAD = new THREE.LineBasicMaterial({ color: 0xe5484d });
+const BED_VOLUME = new THREE.LineBasicMaterial({ color: 0x9aa7b8, transparent: true, opacity: 0.45 });
 // Overhang analysis: faces that need support, drawn over the body.
 const OVERHANG = new THREE.MeshBasicMaterial({ color: 0xff3b30, transparent: true, opacity: 0.7, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
 // Sketch regions: drawn just in front of coplanar faces.
@@ -177,6 +184,8 @@ interface SceneState {
   axes: { line: LineSegments2; id: string; world: boolean }[];
   hoveredAxis: string | null;
   fitted: boolean;
+  /** Print bed and build volume (not pickable). */
+  bedGroup: THREE.Group;
   /** Construction planes and their pickable squares. */
   planeGroup: THREE.Group;
   planes: { mesh: THREE.Mesh; id: string }[];
@@ -255,7 +264,8 @@ export function Viewport(props: Props) {
     const gizmos = new THREE.Group();
     const axisGroup = new THREE.Group();
     const planeGroup = new THREE.Group();
-    scene.add(model, overlayGroup, gizmos, axisGroup, planeGroup);
+    const bedGroup = new THREE.Group();
+    scene.add(model, overlayGroup, gizmos, axisGroup, planeGroup, bedGroup);
     const section = new SectionView([BODY, HOVER, SELECTED, BODY_SELECTED, EDGE, EDGE_SELECTED, EDGE_HOVER, SKETCH, SKETCH_SEL, OVERHANG]);
     scene.add(section.group);
 
@@ -264,7 +274,7 @@ export function Viewport(props: Props) {
       body: null, edgeLines: null, mesh: null, hoveredFace: null, hoveredEdge: null, hoveredHandle: null,
       selectedFaces: new Set(), selectedBody: null, hiddenBody: null, hiddenFaces: new Set(), rigid: null, ghost: null, sweep: null, dragging: false, nav: null, box: null, fitted: false,
       regions: [], hoveredRegion: null, selectedRegions: new Set(), axisGroup, axes: [], hoveredAxis: null,
-      section, sectionSpec: null, planeGroup, planes: [], overhangAngle: null, overhang: null, onOverhangs: null,
+      section, sectionSpec: null, planeGroup, planes: [], bedGroup, overhangAngle: null, overhang: null, onOverhangs: null,
     };
     /** First hit on the kept side of the section plane (the removed half isn't there). */
     const kept = <T extends THREE.Intersection>(hits: T[]): T | undefined => hits.find((h) => section.keeps(h.point));
@@ -673,6 +683,31 @@ export function Viewport(props: Props) {
     applyFaceMaterials(s);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [(props.hiddenFaces ?? []).join("|")]);
+
+  // Print bed: the plate at z = 0 under the model and the outline of the build volume.
+  const bedKey = JSON.stringify(props.bed ?? null);
+  useEffect(() => {
+    const s = state.current;
+    if (!s) return;
+    clearGroup(s.bedGroup);
+    const b = props.bed;
+    if (!b) return;
+    const [bx, by, bz] = b.size;
+    const plate = new THREE.Mesh(new THREE.PlaneGeometry(bx, by), BED);
+    plate.position.set(b.center[0], b.center[1], 0);
+    plate.raycast = () => {};
+    const box = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(bx, by, bz)), BED_VOLUME);
+    box.position.set(b.center[0], b.center[1], bz / 2);
+    box.raycast = () => {};
+    const outline = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-bx / 2, -by / 2, 0), new THREE.Vector3(bx / 2, -by / 2, 0), new THREE.Vector3(bx / 2, by / 2, 0), new THREE.Vector3(-bx / 2, by / 2, 0)]),
+      b.fits ? BED_EDGE : BED_EDGE_BAD,
+    );
+    outline.position.set(b.center[0], b.center[1], 0);
+    outline.raycast = () => {};
+    s.bedGroup.add(plate, box, outline);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bedKey]);
 
   // Construction planes: a translucent square with its outline, at the plane's centre.
   const planesKey = JSON.stringify(props.planes ?? []) + (props.selectedPlane ?? "");

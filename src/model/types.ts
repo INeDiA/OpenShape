@@ -384,6 +384,8 @@ export type MeasureRow = { label: string; value: number; unit: "mm" | "mm²" | "
 export interface Measurement {
   title: string;
   rows: MeasureRow[];
+  /** For a body: the numbers print estimates need. */
+  body?: { volume: number; area: number; size: [number, number, number] };
 }
 
 export type KernelRequest =

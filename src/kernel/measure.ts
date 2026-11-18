@@ -55,11 +55,13 @@ export function measureSelection(result: EvaluationResult, sel: MeasureSelection
     const com = props.centerOfMass as Vec3;
     props.delete();
     const bb = s.boundingBox.bounds;
+    const volume = measureVolume(s), area = measureArea(s);
     return {
       title: "Body",
+      body: { volume, area, size: [0, 1, 2].map((k) => bb[1][k] - bb[0][k]) as [number, number, number] },
       rows: [
-        { label: "Volume", value: measureVolume(s), unit: "mm³" },
-        { label: "Surface area", value: measureArea(s), unit: "mm²" },
+        { label: "Volume", value: volume, unit: "mm³" },
+        { label: "Surface area", value: area, unit: "mm²" },
         { label: "Size", text: [0, 1, 2].map((k) => fmt(bb[1][k] - bb[0][k])).join(" × ") + " mm" },
         { label: "Center of mass", text: com.map(fmt).join(", ") },
       ],
