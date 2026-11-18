@@ -751,7 +751,7 @@ export function App() {
           run: () => (add(makeInsert(doc, sel.faces.filter((n) => cylindrical.has(n)))), manip.clear()),
         },
         { id: "layflat", label: "Lay flat", icon: "layflat", disabled: !singlePlanarFace, title: singlePlanarFace ? "Turn the body so the selected planar face lies on the bed" : "Select one planar face first", run: () => (add(makeLayFlat(doc, singlePlanarFace!)), manip.clear()) },
-        { heading: "Overhangs: Inspect, top right of the view" },
+        { heading: "Overhangs, thin walls: Inspect, top right of the view" },
       ],
     },
   ];
@@ -896,6 +896,7 @@ export function App() {
           onEditSketch={(id) => solverState === "ready" && startSketchEdit(id)}
           planes={editingSketch ? [] : planePreviews}
           bed={editingSketch ? null : bed}
+          minWall={2 * printer.nozzle}
           selectedPlane={selectedPlane}
           onPickPlane={(id) => {
             manip.clear();

@@ -42,6 +42,7 @@ const PATHS = {
   teardrop: "M12 3l6 6a8.5 8.5 0 1 1-12 0z",
   holefit: `${circle(12, 12, 5)}${circle(12, 12, 8.5)}M12 1.5v3M12 19.5v3`,
   insert: "M8 3h8v4H8zM9 7v14h6V7M9 10.5h6M9 14h6M9 17.5h6M5 21h14",
+  thinwall: "M4 4v16M20 4v16M10 4v16M14 4v16M10 12h4M7 12H4M17 12h3",
   search: `${circle(10.5, 10.5, 6.5)}M15.5 15.5 21 21`,
 } as const;
 

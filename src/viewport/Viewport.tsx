@@ -9,6 +9,7 @@ import type { Vec3 } from "../model/frame";
 import { CameraNav, placeSketchCamera, type NavMode, type SketchCamera, type ViewName } from "./navigation";
 import { SectionView, sectionRange, type SectionAxis, type SectionSpec } from "./section";
 import { findOverhangs } from "./overhang";
+import { findThinWalls } from "./thinwalls";
 import { Icon } from "../ui/icons";
 
 const NAV_MODE_KEY = "openshape.navMode";
@@ -88,6 +89,8 @@ interface Props {
   onEditSketch?: (sketchId: string) => void;
   /** 3D printing: the build plate under the model (centred under it, at z = 0), red when the model doesn't fit. */
   bed?: { size: [number, number, number]; center: [number, number]; fits: boolean } | null;
+  /** 3D printing: thinnest wall the printer lays down (mm), the thin wall analysis' default limit. */
+  minWall?: number;
   /** Construction planes, drawn translucent; a click selects one. */
   planes?: PlanePreview[];
   selectedPlane?: string | null;
@@ -126,6 +129,8 @@ const BED_EDGE_BAD = new THREE.LineBasicMaterial({ color: 0xe5484d });
 const BED_VOLUME = new THREE.LineBasicMaterial({ color: 0x9aa7b8, transparent: true, opacity: 0.45 });
 // Overhang analysis: faces that need support, drawn over the body.
 const OVERHANG = new THREE.MeshBasicMaterial({ color: 0xff3b30, transparent: true, opacity: 0.7, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
+// Thin wall analysis: surface where the wall behind is too thin to print.
+const THIN = new THREE.MeshBasicMaterial({ color: 0xc026d3, transparent: true, opacity: 0.75, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -3 });
 // Sketch regions: drawn just in front of coplanar faces.
 const regionMat = (color: number, opacity: number) =>
   new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 });
@@ -196,6 +201,32 @@ interface SceneState {
   overhangAngle: number | null;
   overhang: THREE.Mesh | null;
   onOverhangs: ((area: number | null) => void) | null;
+  /** Thin wall analysis: minimum thickness (mm) when on, its overlay, and who wants the result. */
+  thinLimit: number | null;
+  thin: THREE.Mesh | null;
+  onThin: ((r: { area: number; min: number } | null) => void) | null;
+}
+
+/** Recomputes the thin wall overlay for the current mesh. */
+function refreshThinWalls(s: SceneState) {
+  if (s.thin) {
+    s.thin.parent?.remove(s.thin);
+    s.thin.geometry.dispose();
+    s.thin = null;
+  }
+  let result: { area: number; min: number } | null = null;
+  if (s.thinLimit !== null && s.mesh) {
+    const t = findThinWalls(s.mesh, s.thinLimit);
+    result = { area: t.area, min: t.min };
+    if (t.positions.length) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(t.positions, 3));
+      s.thin = new THREE.Mesh(g, THIN);
+      s.thin.raycast = () => {}; // not pickable: clicks go to the faces below
+      s.model.add(s.thin);
+    }
+  }
+  s.onThin?.(result);
 }
 
 /** Recomputes the overhang overlay for the current mesh. */
@@ -274,7 +305,7 @@ export function Viewport(props: Props) {
       body: null, edgeLines: null, mesh: null, hoveredFace: null, hoveredEdge: null, hoveredHandle: null,
       selectedFaces: new Set(), selectedBody: null, hiddenBody: null, hiddenFaces: new Set(), rigid: null, ghost: null, sweep: null, dragging: false, nav: null, box: null, fitted: false,
       regions: [], hoveredRegion: null, selectedRegions: new Set(), axisGroup, axes: [], hoveredAxis: null,
-      section, sectionSpec: null, planeGroup, planes: [], bedGroup, overhangAngle: null, overhang: null, onOverhangs: null,
+      section, sectionSpec: null, planeGroup, planes: [], bedGroup, overhangAngle: null, overhang: null, onOverhangs: null, thinLimit: null, thin: null, onThin: null,
     };
     /** First hit on the kept side of the section plane (the removed half isn't there). */
     const kept = <T extends THREE.Intersection>(hits: T[]): T | undefined => hits.find((h) => section.keeps(h.point));
@@ -645,8 +676,9 @@ export function Viewport(props: Props) {
       s.model.add(s.edgeLines);
     }
     s.section.update(s.sectionSpec, s.body, s.box);
-    s.overhang = null; // cleared with the model group
+    s.overhang = s.thin = null; // cleared with the model group
     refreshOverhangs(s);
+    refreshThinWalls(s);
 
     for (const sk of sketches) {
       if (sk.id === props.hiddenSketchId) continue;
@@ -878,7 +910,7 @@ export function Viewport(props: Props) {
   return (
     <div className="viewport-wrap">
       <div ref={host} className={`viewport${props.edgesOnly ? " picking" : ""}`} />
-      <ViewBar state={state} />
+      <ViewBar state={state} minWall={props.minWall ?? 0.8} />
       <div ref={overlayRef} className="model-overlay" style={{ display: "none" }}>
         {overlay?.content}
       </div>
@@ -1182,7 +1214,7 @@ const MODE_HINT: Record<NavMode, string> = {
   trackpad: "Two fingers orbit, shift + two fingers pan, pinch zooms",
 };
 
-function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
+function ViewBar({ state, minWall }: { state: RefObject<SceneState | null>; minWall: number }) {
   const [mode, setMode] = useState<NavMode>(readNavMode);
   // Section view: off, or the plane's axis, side and position.
   const [section, setSection] = useState<SectionSpec | null>(null);
@@ -1206,7 +1238,7 @@ function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
   // The scene is set up after this bar mounts (parent effects run last): hook in when switched on.
   useEffect(
     () => () => {
-      if (state.current) state.current.onOverhangs = null;
+      if (state.current) state.current.onOverhangs = state.current.onThin = null;
     },
     [state],
   );
@@ -1217,6 +1249,17 @@ function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
     s.onOverhangs = setOverhangArea;
     s.overhangAngle = angle;
     refreshOverhangs(s);
+  };
+  // Thin wall analysis: minimum thickness when on, and what was found.
+  const [thin, setThin] = useState<number | null>(null);
+  const [thinResult, setThinResult] = useState<{ area: number; min: number } | null>(null);
+  const applyThin = (limit: number | null) => {
+    setThin(limit);
+    const s = state.current;
+    if (!s) return;
+    s.onThin = setThinResult;
+    s.thinLimit = limit;
+    refreshThinWalls(s);
   };
   const fit = () => state.current?.nav?.fit(state.current.box);
   const view = (v: ViewName) => state.current?.nav?.view(v, state.current.box);
@@ -1255,7 +1298,7 @@ function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
         </button>
       ))}
       <span className="inspect-menu">
-        <button className={section || overhang !== null ? "active" : ""} onClick={() => setInspect(!inspect)} aria-expanded={inspect} title="Analysis: section view, overhangs">
+        <button className={section || overhang !== null || thin !== null ? "active" : ""} onClick={() => setInspect(!inspect)} aria-expanded={inspect} title="Analysis: section view, overhangs, thin walls">
           <Icon name="inspect" size={15} /> Inspect <span className="tm-caret">▾</span>
         </button>
         {inspect && (
@@ -1272,6 +1315,15 @@ function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
             >
               <Icon name="overhang" size={16} /> <span className="tm-label">Overhangs</span>
               {overhang !== null && "✓"}
+            </button>
+            <button
+              role="menuitemcheckbox"
+              aria-checked={thin !== null}
+              onClick={() => (applyThin(thin === null ? Math.round(minWall * 100) / 100 : null), setInspect(false))}
+              title="3D printing: walls thinner than the printer can lay down (2 × nozzle by default)"
+            >
+              <Icon name="thinwall" size={16} /> <span className="tm-label">Thin walls</span>
+              {thin !== null && "✓"}
             </button>
           </span>
         )}
@@ -1295,6 +1347,28 @@ function ViewBar({ state }: { state: RefObject<SceneState | null> }) {
           <span className="section-value">°</span>
           <span className={`overhang-area${overhangArea ? " bad" : ""}`} title="Area that needs support">
             {overhangArea ? `${(overhangArea / 100).toFixed(1)} cm²` : "none"}
+          </span>
+        </span>
+      )}
+      {thin !== null && (
+        <span className="section-controls">
+          <input
+            type="number"
+            className="overhang-angle"
+            aria-label="Minimum wall thickness"
+            min={0.1}
+            max={20}
+            step={0.1}
+            value={thin}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (v >= 0.1 && v <= 20) applyThin(v);
+            }}
+            title="Thinnest wall that prints well, mm (2 × nozzle is the usual minimum)"
+          />
+          <span className="section-value">mm</span>
+          <span className={`overhang-area${thinResult?.area ? " bad" : ""}`} title="Thinnest wall found, and the area thinner than the limit">
+            {thinResult?.area ? `min ${thinResult.min.toFixed(2)} mm · ${(thinResult.area / 100).toFixed(1)} cm²` : "none"}
           </span>
         </span>
       )}

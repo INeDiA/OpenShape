@@ -83,4 +83,4 @@ Stampa 3D (ordine indicativo, le più utili prima):
 32. ~~Fori a goccia e compensazione dei fori~~: tetto a 45° (a punta o piatto) sui fori orizzontali, fori allargati di un valore scelto
 33. ~~Export per corpo~~: finestra di export con formato, corpi da esportare, 3MF con oggetti separati o un file per corpo (zip), qualità della mesh
 34. ~~Sedi per inserti filettati a caldo~~: misure M2–M5 preimpostate (o libere) applicate ai fori pilota, dall'apertura (fori passanti: sopra o sotto)
-35. Controllo dello spessore minimo delle pareti (sotto 2 × ugello)
+35. ~~Controllo dello spessore minimo delle pareti~~: Inspect → Thin walls colora in viola le superfici con parete più sottile del limite (predefinito 2 × ugello del profilo stampante), con spessore minimo trovato e area
