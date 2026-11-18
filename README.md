@@ -66,7 +66,7 @@ Funzioni non ancora coperte (ordine indicativo, le più utili prima):
 18. ~~Booleane fra corpi esistenti~~: unione, sottrazione, intersezione come strumento a sé, con corpi strumento consumati o mantenuti e gioco (clearance) per i pezzi che devono incastrarsi
 19. Project: proiettare spigoli e facce del modello nello sketch come geometria di riferimento
 20. ~~Vista in sezione dal vivo~~: piano di taglio su X, Y o Z, lato invertibile, posizione col cursore, sezione piena colorata (tasto S)
-21. Piani di costruzione: sfalsati, inclinati, per tre punti, normali a uno spigolo
+21. ~~Piani di costruzione~~: sfalsati da una faccia o da un piano standard, inclinati attorno a uno spigolo, di mezzeria fra due facce, normali a uno spigolo; sketch sul piano (manca: per tre punti)
 22. Vincoli mancanti: concentricità, simmetria, distanza punto-linea e tra linee parallele, semiassi dell'ellisse, pattern lineari e circolari nello sketch
 23. Strumenti di sketch: raccordo degli angoli, asola (slot), testo, immagini di riferimento, scelta dell'asse di revolve cliccando una linea nella vista
 24. Split di corpi e facce, Face Offset, Replace Face, Scale nel transform, Align e Symmetry

@@ -24,6 +24,7 @@ const ICON: Record<Feature["type"], string> = {
   draft: "⏥",
   boolean: "⊕",
   layflat: "⤓",
+  plane: "◱",
   fillet: "◜",
   chamfer: "◸",
   cove: "◟",

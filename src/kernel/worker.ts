@@ -28,7 +28,7 @@ const ready = (async () => {
 async function handleEvaluate(req: Extract<KernelRequest, { kind: "evaluate" }>) {
   const t0 = performance.now();
   try {
-    const { body, bodies, faceBody, sketches, status, ownsBody } = await evaluate(req.doc, { stopBefore: req.stopBefore });
+    const { body, bodies, faceBody, sketches, planes, status, ownsBody } = await evaluate(req.doc, { stopBefore: req.stopBefore });
     // Read everything we need before freeing kernel memory.
     const bodyInfo = bodies.map((b) => ({ id: b.id, faces: b.shape.shape.faces.length }));
     let mesh = null;
@@ -43,7 +43,7 @@ async function handleEvaluate(req: Extract<KernelRequest, { kind: "evaluate" }>)
     }
     const transfer: Transferable[] = [];
     if (mesh) transfer.push(mesh.vertices.buffer, mesh.normals.buffer, mesh.triangles.buffer, mesh.edges.buffer);
-    post({ kind: "evaluated", seq: req.seq, mesh, bodies: bodyInfo, sketches, status, ms: performance.now() - t0 }, transfer);
+    post({ kind: "evaluated", seq: req.seq, mesh, bodies: bodyInfo, sketches, planes, status, ms: performance.now() - t0 }, transfer);
   } catch (e) {
     // Always answer: the client keeps at most one evaluation in flight.
     console.error(e);

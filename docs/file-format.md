@@ -57,14 +57,15 @@ Every feature has:
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | Unique within the document. Referenced by other features. |
-| `type` | string | `sketch`, `extrude`, `revolve`, `sweep`, `loft`, `fillet`, `chamfer`, `cove`, `draft`, `pushpull`, `shell`, `mirror`, `pattern`, `transform`, `boolean`, `layflat`, `import` |
+| `type` | string | `sketch`, `plane`, `extrude`, `revolve`, `sweep`, `loft`, `fillet`, `chamfer`, `cove`, `draft`, `pushpull`, `shell`, `mirror`, `pattern`, `transform`, `boolean`, `layflat`, `import` |
 | `name` | string | Display name. |
 | `suppressed` | boolean | Skipped during replay when true. |
 | `exprs` | object, optional | Maps a numeric field name to an expression, e.g. `{ "distance": "height / 2" }`. The field still holds the last computed number. |
 
 Type-specific fields:
 
-- **sketch**: `plane` (`"XY"`, `"XZ"`, `"YZ"`), optional `face` (persistent name of a planar face; when set, `plane` is ignored), `offset` (number, along the plane normal), `sketch` (see below).
+- **sketch**: `plane` (`"XY"`, `"XZ"`, `"YZ"`), optional `face` (persistent name of a planar face; when set, `plane` is ignored), optional `planeId` (an earlier `plane` feature; takes precedence over both), `offset` (number, along the plane normal), `sketch` (see below).
+- **plane**: a construction plane. `mode` is `offset` (parallel to `face`, or to the standard plane `base` when there's no face, at `distance`), `angle` (through the straight edge `edge`, turned `angle` degrees from the planar `face`), `midplane` (halfway between the parallel planar faces `face` and `face2`) or `normal` (perpendicular to `edge` at `position`, 0 = start … 1 = end). `distance`, `angle`, `position` are always present. Removing a plane removes the sketches on it.
 - **extrude**: `sketchId` (an earlier sketch), `distance` (may be negative), `op`, `regions?`, `throughAll?` (with `op` `cut` or `intersect`: go through the whole target body; `distance` then only gives the direction by its sign).
 - **revolve**: `sketchId`, `axis` (`"X"`, `"Y"`, `"Z"`: a world axis through the origin), `axisLine?` (id of a line of the sketch to turn around instead; it takes precedence over `axis`), `angle` (degrees), `op`, `regions?`.
 

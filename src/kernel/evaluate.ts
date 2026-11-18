@@ -32,7 +32,7 @@ import {
   type FaceNames,
   type NamedShape,
 } from "./naming";
-import type { BodyId, BooleanOp, Document, Feature, FeatureStatus, MeshData, RegionPreview, SketchFeature, SketchPreview } from "../model/types";
+import type { BodyId, BooleanOp, Document, Feature, FeatureStatus, MeshData, PlaneFeature, PlanePreview, RegionPreview, SketchFeature, SketchPreview } from "../model/types";
 import { frameToLocal, frameToWorld, planeFrame, standardFrame, type Frame, type Vec3 } from "../model/frame";
 import { entityMap, pointOf } from "../sketch/model";
 import { curvePolyline } from "../sketch/curves";
@@ -56,6 +56,8 @@ export interface EvaluationResult {
   /** Face hash (in `body`) -> owning body id. */
   faceBody: Map<number, BodyId>;
   sketches: SketchPreview[];
+  /** Construction planes, in history order. */
+  planes: PlanePreview[];
   status: FeatureStatus[];
   /** True when `body` is a compound made for this result and may be freed by the caller. */
   ownsBody: boolean;
@@ -331,6 +333,7 @@ interface Snapshot {
   last: BodyId | null;
   sketches: Map<string, SketchContext>;
   previews: SketchPreview[];
+  planes: Map<string, PlanePreview>;
   status: FeatureStatus[];
 }
 
@@ -372,6 +375,7 @@ export async function evaluate(doc: Document, opts: EvaluateOptions = {}): Promi
 
   const sketches = new Map<string, SketchContext>(from?.sketches);
   const previews: SketchPreview[] = [...(from?.previews ?? [])];
+  const planes = new Map<string, PlanePreview>(from?.planes);
   const status: FeatureStatus[] = [...(from?.status ?? [])];
   const bodies = new Bodies(from ? { map: from.bodies, last: from.last } : undefined);
   const next = snapshots.slice(0, reuse);
@@ -382,13 +386,13 @@ export async function evaluate(doc: Document, opts: EvaluateOptions = {}): Promi
       status.push({ id: f.id, ok: true });
     } else {
       try {
-        const warning = await applyFeature(f, bodies, sketches, previews);
+        const warning = await applyFeature(f, bodies, sketches, previews, planes);
         status.push(warning ? { id: f.id, ok: false, error: warning } : { id: f.id, ok: true });
       } catch (e) {
         status.push({ id: f.id, ok: false, error: e instanceof Error ? e.message : String(e) });
       }
     }
-    next.push({ key: keys[i], bodies: new Map(bodies.map), last: bodies.last, sketches: new Map(sketches), previews: [...previews], status: [...status] });
+    next.push({ key: keys[i], bodies: new Map(bodies.map), last: bodies.last, sketches: new Map(sketches), previews: [...previews], planes: new Map(planes), status: [...status] });
   }
   // A shorter history (rollback) keeps the longer cache: it's still a valid prefix.
   if (features.length >= snapshots.length || reuse < features.length) snapshots = next;
@@ -404,7 +408,7 @@ export async function evaluate(doc: Document, opts: EvaluateOptions = {}): Promi
     body = { shape: makeCompound(list.map((b) => b.shape.shape.clone())) as unknown as Shape3D, names };
   }
   for (const b of list) for (const f of b.shape.shape.faces) faceBody.set(f.hashCode, b.id);
-  return { body, bodies: list, faceBody, sketches: previews, status, ownsBody: list.length > 1, reused: reuse };
+  return { body, bodies: list, faceBody, sketches: previews, planes: [...planes.values()], status, ownsBody: list.length > 1, reused: reuse };
 }
 
 /**
@@ -424,7 +428,76 @@ function throughDistance(bodies: Bodies, target: BodyId | undefined, frame: Fram
   return sign * (reach + 1);
 }
 
-async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, SketchContext>, previews: SketchPreview[]): Promise<string | undefined> {
+/** A body's size, for drawing planes on it at a sensible scale. */
+function bodySize(b: NamedShape | undefined): number {
+  if (!b) return 60;
+  const [lo, hi] = b.shape.boundingBox.bounds;
+  return Math.max(20, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.8);
+}
+
+/** A straight or curved edge of the model by persistent name. */
+function edgeByName(bodies: Bodies, name: string) {
+  const owner = bodies.withEdge(name);
+  if (!owner) throw new Error(`Edge "${name}" no longer exists`);
+  const edge = nameEdges(owner.shape.shape, owner.shape.names).byName.get(name)!;
+  return { owner, edge };
+}
+
+/** Rodrigues: `v` turned by `deg` degrees about the unit axis `k` (right-handed). */
+function rotateAbout(v: Vec3, k: Vec3, deg: number): Vec3 {
+  const a = (deg * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
+  const kv = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+  const kx: Vec3 = [k[1] * v[2] - k[2] * v[1], k[2] * v[0] - k[0] * v[2], k[0] * v[1] - k[1] * v[0]];
+  return [0, 1, 2].map((i) => v[i] * c + kx[i] * s + k[i] * kv * (1 - c)) as Vec3;
+}
+
+/** The plane a construction plane feature defines. */
+function constructionPlane(f: PlaneFeature, bodies: Bodies): PlanePreview {
+  const at = (point: Vec3, normal: Vec3, size: number): PlanePreview => ({ id: f.id, frame: planeFrame(point, normal), center: point, size });
+  switch (f.mode) {
+    case "offset": {
+      if (!f.face) {
+        const frame = standardFrame(f.base ?? "XY", f.distance);
+        return { id: f.id, frame, center: frame.origin, size: bodySize(bodies.target()?.shape) };
+      }
+      const owner = bodies.withFace(f.face);
+      const { point, normal } = planarFaceFrame(owner.shape, f.face, 0);
+      return at([point[0] + normal[0] * f.distance, point[1] + normal[1] * f.distance, point[2] + normal[2] * f.distance], normal, bodySize(owner.shape));
+    }
+    case "midplane": {
+      if (!f.face || !f.face2) throw new Error("Pick two parallel planar faces");
+      const a = planarFaceFrame(bodies.withFace(f.face).shape, f.face, 0);
+      const owner = bodies.withFace(f.face2);
+      const b = planarFaceFrame(owner.shape, f.face2, 0);
+      if (Math.abs(a.normal[0] * b.normal[0] + a.normal[1] * b.normal[1] + a.normal[2] * b.normal[2]) < 0.9999) throw new Error("The two faces aren't parallel");
+      // Halfway along the normal; the centre stays over the first face.
+      const d = (b.point[0] - a.point[0]) * a.normal[0] + (b.point[1] - a.point[1]) * a.normal[1] + (b.point[2] - a.point[2]) * a.normal[2];
+      return at([a.point[0] + (a.normal[0] * d) / 2, a.point[1] + (a.normal[1] * d) / 2, a.point[2] + (a.normal[2] * d) / 2], a.normal, bodySize(owner.shape));
+    }
+    case "angle": {
+      if (!f.face || !f.edge) throw new Error("Pick a planar face and a straight edge");
+      const { normal } = planarFaceFrame(bodies.withFace(f.face).shape, f.face, 0);
+      const { owner, edge } = edgeByName(bodies, f.edge);
+      if (edge.geomType !== "LINE") throw new Error("The hinge must be a straight edge");
+      const s = edge.startPoint, e = edge.endPoint;
+      const axis: Vec3 = [e.x - s.x, e.y - s.y, e.z - s.z];
+      const len = Math.hypot(...axis);
+      const k: Vec3 = [axis[0] / len, axis[1] / len, axis[2] / len];
+      if (Math.abs(k[0] * normal[0] + k[1] * normal[1] + k[2] * normal[2]) > 1e-6) throw new Error("The edge must lie in the face's plane (or parallel to it)");
+      const mid: Vec3 = [(s.x + e.x) / 2, (s.y + e.y) / 2, (s.z + e.z) / 2];
+      return at(mid, rotateAbout(normal, k, f.angle), bodySize(owner.shape));
+    }
+    case "normal": {
+      if (!f.edge) throw new Error("Pick an edge");
+      const { owner, edge } = edgeByName(bodies, f.edge);
+      const t = Math.max(0, Math.min(1, f.position));
+      const p = edge.pointAt(t), d = edge.tangentAt(t);
+      return at([p.x, p.y, p.z], [d.x, d.y, d.z], Math.max(10, bodySize(owner.shape) * 0.5));
+    }
+  }
+}
+
+async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, SketchContext>, previews: SketchPreview[], planes: Map<string, PlanePreview>): Promise<string | undefined> {
   const sketchOf = (id: string) => {
     const s = sketches.get(id);
     if (!s) throw new Error("Referenced sketch is missing, suppressed or failed");
@@ -432,8 +505,20 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
   };
 
   switch (f.type) {
+    case "plane": {
+      planes.set(f.id, constructionPlane(f, bodies));
+      return;
+    }
+
     case "sketch": {
-      if (f.face) {
+      if (f.planeId) {
+        const plane = planes.get(f.planeId);
+        if (!plane) throw new Error("Its construction plane is missing, suppressed or failed");
+        const { origin: o, n } = plane.frame;
+        const frame = { ...plane.frame, origin: [o[0] + n[0] * f.offset, o[1] + n[1] * f.offset, o[2] + n[2] * f.offset] as Vec3 };
+        sketches.set(f.id, { feature: f, frame });
+        previews.push({ id: f.id, segments: sketchSegments(f, frame), frame, regions: regionPreviews(f) });
+      } else if (f.face) {
         const owner = bodies.withFace(f.face);
         const { face, frame } = planarFaceFrame(owner.shape, f.face, f.offset);
         sketches.set(f.id, { feature: f, frame });

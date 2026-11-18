@@ -41,6 +41,8 @@ interface Props {
   onEditSketch: (id: string) => void;
   canEditSketch: boolean;
   scope: Scope;
+  /** Starts a sketch on a construction plane. */
+  onSketchOnPlane: (planeId: string) => void;
   /** Bodies of the shown model (for Booleans). */
   bodies: { id: string; name: string }[];
   /** Draft: pick the neutral face again in the viewport. */
@@ -106,7 +108,7 @@ const PLANES: [PlaneName, string][] = [
   ["YZ", "YZ (right)"],
 ];
 
-export function PropertiesPanel({ feature: f, sketches, status, onChange, onEditSketch, canEditSketch, scope, bodies, onPickNeutral, pickingNeutral }: Props) {
+export function PropertiesPanel({ feature: f, sketches, status, onChange, onEditSketch, canEditSketch, scope, bodies, onSketchOnPlane, onPickNeutral, pickingNeutral }: Props) {
   const sketchOptions = sketches.map((s) => [s.id, s.name] as [string, string]);
   if (!f) {
     return (
@@ -125,7 +127,9 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
 
       {f.type === "sketch" && (
         <>
-          {f.face ? (
+          {f.planeId ? (
+            <p className="muted">On a construction plane: it follows the plane when the model changes.</p>
+          ) : f.face ? (
             <p className="muted">
               On face <code title={f.face}>{shortName(f.face)}</code>. It follows the face when upstream features change.
             </p>
@@ -283,6 +287,49 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
           <p className="muted">
             Face <code title={f.face}>{shortName(f.face)}</code>. Positive adds material, negative removes it. Click another planar face to change it.
           </p>
+        </>
+      )}
+
+      {f.type === "plane" && (
+        <>
+          <Select
+            label="Type"
+            value={f.mode}
+            options={[
+              ["offset", "Offset"],
+              ["angle", "At an angle"],
+              ["midplane", "Midplane"],
+              ["normal", "Normal to edge"],
+            ]}
+            onChange={(mode) => onChange({ mode })}
+          />
+          {f.mode === "offset" && !f.face && <Select label="From" value={f.base ?? "XY"} options={PLANES} onChange={(base) => onChange({ base })} />}
+          {f.mode === "offset" && <Field label="Distance" feature={f} field="distance" scope={scope} onChange={onChange} />}
+          {f.mode === "angle" && <Field label="Angle °" feature={f} field="angle" scope={scope} onChange={onChange} />}
+          {f.mode === "normal" && <Field label="Position (0–1)" feature={f} field="position" scope={scope} onChange={onChange} />}
+          <p className="muted">
+            {f.face && (
+              <>
+                Face <code title={f.face}>{shortName(f.face)}</code>
+                {f.face2 && (
+                  <>
+                    {" "}
+                    and <code title={f.face2}>{shortName(f.face2)}</code>
+                  </>
+                )}
+                .{" "}
+              </>
+            )}
+            {f.edge && (
+              <>
+                Edge <code title={f.edge}>{shortName(f.edge)}</code>.{" "}
+              </>
+            )}
+            To change them, select the faces or edges and add a new plane.
+          </p>
+          <button className="wide" disabled={!canEditSketch} onClick={() => onSketchOnPlane(f.id)}>
+            ✎ Sketch on this plane
+          </button>
         </>
       )}
 

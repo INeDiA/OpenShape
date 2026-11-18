@@ -2,7 +2,7 @@
 // the kernel replays them from scratch to produce the current solid.
 
 import type { SketchData } from "../sketch/model";
-import type { Frame } from "./frame";
+import type { Frame, Vec3 } from "./frame";
 
 export type PlaneName = "XY" | "XZ" | "YZ";
 
@@ -21,6 +21,8 @@ export interface SketchFeature extends FeatureBase {
   plane: PlaneName;
   /** Persistent name of a planar face to sketch on (see kernel/naming.ts). */
   face?: string;
+  /** Construction plane feature to sketch on (takes precedence over `face` and `plane`). */
+  planeId?: string;
   /** Distance along the plane normal. */
   offset: number;
   sketch: SketchData;
@@ -163,6 +165,38 @@ export interface BooleanFeature extends FeatureBase {
   clearance?: number;
 }
 
+/**
+ * Construction plane, to sketch on:
+ * - offset: parallel to a planar face (or a standard plane) at `distance`;
+ * - angle: through a straight edge, turned `angle` degrees from a planar face;
+ * - midplane: halfway between two parallel planar faces;
+ * - normal: perpendicular to an edge, at `position` (0 start … 1 end) along it.
+ */
+export interface PlaneFeature extends FeatureBase {
+  type: "plane";
+  mode: "offset" | "angle" | "midplane" | "normal";
+  /** Offset from a standard plane when `face` is absent. */
+  base?: PlaneName;
+  face?: string;
+  /** Midplane: the second face. */
+  face2?: string;
+  /** Angle: the hinge (straight edge); normal: the edge the plane cuts. */
+  edge?: string;
+  distance: number;
+  angle: number;
+  position: number;
+}
+
+/** A construction plane as shown in the viewport. */
+export interface PlanePreview {
+  id: string;
+  frame: Frame;
+  /** Where to draw it (the plane's frame origin can be far from the model). */
+  center: Vec3;
+  /** Side of the square drawn, mm. */
+  size: number;
+}
+
 /** 3D printing: turns the body so a planar face lies on the bed (z = 0, facing down). */
 export interface LayFlatFeature extends FeatureBase {
   type: "layflat";
@@ -210,6 +244,7 @@ export type Feature =
   | TransformFeature
   | BooleanFeature
   | LayFlatFeature
+  | PlaneFeature
   | ImportFeature;
 
 export interface Variable {
@@ -367,6 +402,7 @@ export type KernelResponse =
       mesh: MeshData | null;
       bodies: { id: BodyId; faces: number }[];
       sketches: SketchPreview[];
+      planes?: PlanePreview[];
       status: FeatureStatus[];
       ms: number;
     }

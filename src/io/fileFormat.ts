@@ -94,6 +94,7 @@ export function validateDocument(raw: unknown): Document {
 
   const ids = new Set<string>();
   const sketchIds = new Set<string>();
+  const planeIds = new Set<string>();
   for (const [i, f] of (raw.features as unknown[]).entries()) {
     const at = `features[${i}]`;
     need(isObj(f), `${at} is not an object`);
@@ -107,6 +108,7 @@ export function validateDocument(raw: unknown): Document {
         need(["XY", "XZ", "YZ"].includes(f.plane as string), `${at}.plane is invalid`);
         num(f.offset, `${at}.offset`);
         if (f.face !== undefined) str(f.face, `${at}.face`);
+        if (f.planeId !== undefined) need(planeIds.has(f.planeId as string), `${at} references a plane that doesn't precede it`);
         validateSketch(f.sketch, `${at}.sketch`);
         sketchIds.add(f.id as string);
         break;
@@ -133,6 +135,16 @@ export function validateDocument(raw: unknown): Document {
         need(Array.isArray(f.sections) && f.sections.length >= 2 && f.sections.every((x) => typeof x === "string" && sketchIds.has(x)), `${at}.sections must list at least two earlier sketches`);
         need(typeof f.ruled === "boolean", `${at}.ruled must be true or false`);
         need(["new", "join", "cut", "intersect"].includes(f.op as string), `${at}.op is invalid`);
+        break;
+      case "plane":
+        need(["offset", "angle", "midplane", "normal"].includes(f.mode as string), `${at}.mode is invalid`);
+        if (f.base !== undefined) need(["XY", "XZ", "YZ"].includes(f.base as string), `${at}.base is invalid`);
+        for (const k of ["face", "face2", "edge"] as const) if (f[k] !== undefined) str(f[k], `${at}.${k}`);
+        for (const k of ["distance", "angle", "position"] as const) {
+          if (f[k] === undefined) f[k] = k === "angle" ? 45 : 0;
+          num(f[k], `${at}.${k}`);
+        }
+        planeIds.add(f.id as string);
         break;
       case "layflat":
         str(f.face, `${at}.face`);

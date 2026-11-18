@@ -1,4 +1,4 @@
-import type { BooleanOp, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, PlaneName, ImportFeature, MirrorFeature, PatternFeature, PushPullFeature, RevolveFeature, ShellFeature, SketchFeature, CoveFeature, SweepFeature, LoftFeature, DraftFeature, BooleanFeature, BodyId, LayFlatFeature } from "./types";
+import type { BooleanOp, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, PlaneName, ImportFeature, MirrorFeature, PatternFeature, PushPullFeature, RevolveFeature, ShellFeature, SketchFeature, CoveFeature, SweepFeature, LoftFeature, DraftFeature, BooleanFeature, BodyId, LayFlatFeature, PlaneFeature } from "./types";
 import { emptySketch, type SketchData } from "../sketch/model";
 import { addCircle, addConstraint, addRectangle } from "../sketch/builders";
 
@@ -61,6 +61,14 @@ export function makeDraft(doc: Document, faces: string[], neutral = ""): DraftFe
 
 export function makeBoolean(doc: Document, target: BodyId | "", op: BooleanFeature["op"] = "join"): BooleanFeature {
   return { type: "boolean", id: newId("bo"), name: nextName(doc, "Boolean"), suppressed: false, op, target, tools: [], keepTools: false };
+}
+
+export function makePlane(doc: Document, init: Partial<PlaneFeature> = {}): PlaneFeature {
+  return { type: "plane", id: newId("pl"), name: nextName(doc, "Plane"), suppressed: false, mode: "offset", distance: 10, angle: 45, position: 0, ...init };
+}
+
+export function makeSketchOnPlane(doc: Document, planeId: string): SketchFeature {
+  return { ...makeSketch(doc, "XY", 0), planeId };
 }
 
 export function makeLayFlat(doc: Document, face: string): LayFlatFeature {
@@ -139,6 +147,7 @@ export function removeFeature(doc: Document, id: string): Document {
   const dependents = new Set([id]);
   for (const f of doc.features) {
     if (sketchUses(f).some((u) => dependents.has(u.sketchId))) dependents.add(f.id);
+    if (f.type === "sketch" && f.planeId && dependents.has(f.planeId)) dependents.add(f.id);
   }
   return { ...doc, features: doc.features.filter((f) => !dependents.has(f.id)) };
 }

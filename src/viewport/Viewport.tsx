@@ -4,7 +4,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
-import type { MeshData, SketchPreview } from "../model/types";
+import type { MeshData, PlanePreview, SketchPreview } from "../model/types";
 import type { Vec3 } from "../model/frame";
 import { CameraNav, placeSketchCamera, type NavMode, type SketchCamera, type ViewName } from "./navigation";
 import { SectionView, sectionRange, type SectionAxis, type SectionSpec } from "./section";
@@ -85,6 +85,10 @@ interface Props {
   onPickRegion?: (sketchId: string, regionId: string, additive: boolean) => void;
   /** Double click on a sketch region opens the sketch. */
   onEditSketch?: (sketchId: string) => void;
+  /** Construction planes, drawn translucent; a click selects one. */
+  planes?: PlanePreview[];
+  selectedPlane?: string | null;
+  onPickPlane?: (id: string) => void;
   /** While choosing a revolve axis: the lines to pick from (clicks pick only these). */
   axisCandidates?: { id: string; a: Vec3; b: Vec3; world: boolean }[];
   onPickAxis?: (id: string) => void;
@@ -107,6 +111,11 @@ const AXIS = new LineMaterial({ color: 0x8e6cf0, linewidth: 2.5, worldUnits: fal
 const AXIS_WORLD = new LineMaterial({ color: 0x8e6cf0, linewidth: 2, worldUnits: false, dashed: true, dashSize: 4, gapSize: 3, transparent: true, opacity: 0.7 });
 const AXIS_HOVER = new LineMaterial({ color: 0x4f8cff, linewidth: 4, worldUnits: false });
 const HIDDEN = new THREE.MeshBasicMaterial({ visible: false });
+// Construction planes.
+const PLANE = new THREE.MeshBasicMaterial({ color: 0x6b8aff, transparent: true, opacity: 0.1, depthWrite: false, side: THREE.DoubleSide });
+const PLANE_SEL = new THREE.MeshBasicMaterial({ color: 0x2f6fed, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide });
+const PLANE_EDGE = new THREE.LineBasicMaterial({ color: 0x6b8aff });
+const PLANE_EDGE_SEL = new THREE.LineBasicMaterial({ color: 0x2f6fed });
 // Overhang analysis: faces that need support, drawn over the body.
 const OVERHANG = new THREE.MeshBasicMaterial({ color: 0xff3b30, transparent: true, opacity: 0.7, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
 // Sketch regions: drawn just in front of coplanar faces.
@@ -167,6 +176,9 @@ interface SceneState {
   axes: { line: LineSegments2; id: string; world: boolean }[];
   hoveredAxis: string | null;
   fitted: boolean;
+  /** Construction planes and their pickable squares. */
+  planeGroup: THREE.Group;
+  planes: { mesh: THREE.Mesh; id: string }[];
   /** Live section: clipping plane and cap. */
   section: SectionView;
   sectionSpec: SectionSpec | null;
@@ -241,7 +253,8 @@ export function Viewport(props: Props) {
     const overlayGroup = new THREE.Group();
     const gizmos = new THREE.Group();
     const axisGroup = new THREE.Group();
-    scene.add(model, overlayGroup, gizmos, axisGroup);
+    const planeGroup = new THREE.Group();
+    scene.add(model, overlayGroup, gizmos, axisGroup, planeGroup);
     const section = new SectionView([BODY, HOVER, SELECTED, BODY_SELECTED, EDGE, EDGE_SELECTED, EDGE_HOVER, SKETCH, SKETCH_SEL, OVERHANG]);
     scene.add(section.group);
 
@@ -250,7 +263,7 @@ export function Viewport(props: Props) {
       body: null, edgeLines: null, mesh: null, hoveredFace: null, hoveredEdge: null, hoveredHandle: null,
       selectedFaces: new Set(), selectedBody: null, hiddenBody: null, hiddenFaces: new Set(), rigid: null, ghost: null, sweep: null, dragging: false, nav: null, box: null, fitted: false,
       regions: [], hoveredRegion: null, selectedRegions: new Set(), axisGroup, axes: [], hoveredAxis: null,
-      section, sectionSpec: null, overhangAngle: null, overhang: null, onOverhangs: null,
+      section, sectionSpec: null, planeGroup, planes: [], overhangAngle: null, overhang: null, onOverhangs: null,
     };
     /** First hit on the kept side of the section plane (the removed half isn't there). */
     const kept = <T extends THREE.Intersection>(hits: T[]): T | undefined => hits.find((h) => section.keeps(h.point));
@@ -337,6 +350,16 @@ export function Viewport(props: Props) {
       const bodyHit = s.body ? kept(ray.intersectObject(s.body)) : undefined;
       if (bodyHit && bodyHit.distance < hit.distance - 0.05) return null;
       return s.regions.find((r) => r.mesh === hit.object) ?? null;
+    };
+
+    /** Construction plane under the cursor, unless the body is in front of it. */
+    const pickPlane = (): string | null => {
+      if (!s.planes.length) return null;
+      const hit = kept(ray.intersectObjects(s.planes.map((p) => p.mesh), false));
+      if (!hit) return null;
+      const bodyHit = s.body ? kept(ray.intersectObject(s.body)) : undefined;
+      if (bodyHit && bodyHit.distance < hit.distance - 0.05) return null;
+      return s.planes.find((p) => p.mesh === hit.object)?.id ?? null;
     };
 
     const pickFace = (): number | null => {
@@ -471,6 +494,8 @@ export function Viewport(props: Props) {
       const edge = s.mesh ? pickEdge() : null;
       if (edge != null) return latest.current.onPickEdge(s.mesh!.edgeNames[edge], additive);
       if (latest.current.edgesOnly) return;
+      const plane = pickPlane();
+      if (plane) return latest.current.onPickPlane?.(plane);
       const region = pickRegion();
       if (region) return latest.current.onPickRegion?.(region.sketch, region.id, additive);
       if (!s.mesh) return latest.current.onPickFace(null, additive);
@@ -647,6 +672,30 @@ export function Viewport(props: Props) {
     applyFaceMaterials(s);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [(props.hiddenFaces ?? []).join("|")]);
+
+  // Construction planes: a translucent square with its outline, at the plane's centre.
+  const planesKey = JSON.stringify(props.planes ?? []) + (props.selectedPlane ?? "");
+  useEffect(() => {
+    const s = state.current;
+    if (!s) return;
+    clearGroup(s.planeGroup);
+    s.planes = [];
+    for (const p of props.planes ?? []) {
+      const sel = p.id === props.selectedPlane;
+      const { x, y, n } = p.frame;
+      const basis = new THREE.Matrix4().makeBasis(new THREE.Vector3(...x), new THREE.Vector3(...y), new THREE.Vector3(...n)).setPosition(...p.center);
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(p.size, p.size), sel ? PLANE_SEL : PLANE);
+      mesh.applyMatrix4(basis);
+      mesh.renderOrder = 2;
+      const h = p.size / 2;
+      const outline = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-h, -h, 0), new THREE.Vector3(h, -h, 0), new THREE.Vector3(h, h, 0), new THREE.Vector3(-h, h, 0)]), sel ? PLANE_EDGE_SEL : PLANE_EDGE);
+      outline.applyMatrix4(basis);
+      outline.raycast = () => {};
+      s.planeGroup.add(mesh, outline);
+      s.planes.push({ mesh, id: p.id });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planesKey]);
 
   // Revolve axis candidates.
   const axisKey = (props.axisCandidates ?? []).map((c) => c.id + c.a.join(",") + c.b.join(",")).join(";");

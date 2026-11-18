@@ -9,6 +9,7 @@ import {
   makeEdgeTreatment,
   makeExtrude,
   makeLayFlat,
+  makePlane,
   makeLoft,
   makeSweep,
   makeImport,
@@ -18,13 +19,14 @@ import {
   makeShell,
   makeSketch,
   makeSketchOnFace,
+  makeSketchOnPlane,
   removeFeature,
   sketchUses,
   updateFeature,
 } from "./model/doc";
 import { findLoops } from "./sketch/profiles";
 import { sketchPath } from "./sketch/path";
-import type { Document, Feature, FeatureStatus, Measurement, MeshData, PlaneName, SketchFeature, SketchPreview } from "./model/types";
+import type { Document, Feature, FeatureStatus, Measurement, MeshData, PlaneName, PlanePreview, SketchFeature, SketchPreview } from "./model/types";
 import { SketchEditor } from "./sketch/SketchEditor";
 import { loadSolver, solve, solverReady } from "./sketch/solver";
 import { resolveDocument, type SketchSolver } from "./model/resolve";
@@ -118,6 +120,7 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mesh, setMesh] = useState<MeshData | null>(null);
   const [sketchPreviews, setSketchPreviews] = useState<SketchPreview[]>([]);
+  const [planePreviews, setPlanePreviews] = useState<PlanePreview[]>([]);
   const [status, setStatus] = useState<Map<string, FeatureStatus>>(new Map());
   const [evalMs, setEvalMs] = useState<number | null>(null);
   const [hover, setHover] = useState<HoverInfo | null>(null);
@@ -153,6 +156,7 @@ export function App() {
     k.onEvaluated = (r) => {
       setMesh(r.mesh);
       setSketchPreviews(r.sketches);
+      setPlanePreviews(r.planes ?? []);
       setStatus(new Map(r.status.map((s) => [s.id, s])));
       setEvalMs(r.ms);
     };
@@ -320,9 +324,11 @@ export function App() {
   const liveFaces = manip.selection.faces;
   const singlePlanarFace = manip.singlePlanarFace;
 
+  // A construction plane picked in the history or the viewport: new sketches go on it.
+  const selectedPlane = selectedFeature?.type === "plane" ? selectedFeature.id : null;
   const newSketch = () => {
-    // With one planar face selected, sketch on it; otherwise on the chosen standard plane.
-    const f = singlePlanarFace ? makeSketchOnFace(doc, singlePlanarFace) : makeSketch(doc, newSketchPlane);
+    // On the selected construction plane, or a single selected planar face, or the chosen standard plane.
+    const f = selectedPlane ? makeSketchOnPlane(doc, selectedPlane) : singlePlanarFace ? makeSketchOnFace(doc, singlePlanarFace) : makeSketch(doc, newSketchPlane);
     add(f);
     manip.clear();
     startSketchEdit(f.id);
@@ -545,11 +551,11 @@ export function App() {
           <button
             disabled={solverState !== "ready" || !!editingSketch}
             onClick={newSketch}
-            title={singlePlanarFace ? "New sketch on the selected face" : "New sketch on the chosen plane (select a planar face to sketch on it)"}
+            title={selectedPlane ? "New sketch on the selected construction plane" : singlePlanarFace ? "New sketch on the selected face" : "New sketch on the chosen plane (select a planar face or a construction plane to sketch on it)"}
           >
-            {singlePlanarFace ? "✎ Sketch on face" : "✎ Sketch"}
+            {selectedPlane ? "✎ Sketch on plane" : singlePlanarFace ? "✎ Sketch on face" : "✎ Sketch"}
           </button>
-          <select value={newSketchPlane} onChange={(e) => setNewSketchPlane(e.target.value as PlaneName)} disabled={!!editingSketch || !!singlePlanarFace} title="Sketch plane">
+          <select value={newSketchPlane} onChange={(e) => setNewSketchPlane(e.target.value as PlaneName)} disabled={!!editingSketch || !!singlePlanarFace || !!selectedPlane} title="Sketch plane">
             <option value="XY">XY (top)</option>
             <option value="XZ">XZ (front)</option>
             <option value="YZ">YZ (right)</option>
@@ -589,6 +595,27 @@ export function App() {
             }}
           >
             ⇕ Push/Pull
+          </button>
+          <button
+            title="Construction plane from the selection: a planar face (offset), two parallel faces (midplane), a face and an edge (angle), an edge (normal to it), or nothing (offset from the chosen standard plane)"
+            onClick={() => {
+              const sel = manip.selection;
+              const faces = sel.faces.filter((n) => faceInfo.get(n));
+              const init =
+                faces.length >= 2
+                  ? { mode: "midplane" as const, face: faces[0], face2: faces[1] }
+                  : faces.length === 1 && sel.edges.length
+                    ? { mode: "angle" as const, face: faces[0], edge: sel.edges[0] }
+                    : faces.length === 1
+                      ? { mode: "offset" as const, face: faces[0] }
+                      : sel.edges.length
+                        ? { mode: "normal" as const, edge: sel.edges[0], position: 0.5 }
+                        : { mode: "offset" as const, base: newSketchPlane };
+              add(makePlane(doc, init));
+              manip.clear();
+            }}
+          >
+            ◱ Plane
           </button>
           <button
             disabled={!singlePlanarFace}
@@ -741,6 +768,12 @@ export function App() {
             if (selectedFeature) setSelectedId(null);
           }}
           onEditSketch={(id) => solverState === "ready" && startSketchEdit(id)}
+          planes={editingSketch ? [] : planePreviews}
+          selectedPlane={selectedPlane}
+          onPickPlane={(id) => {
+            manip.clear();
+            setSelectedId(id);
+          }}
           onPickBody={(id) => {
             if (faceFeature || pickingFeature) return;
             manip.pickBody(id);
@@ -817,6 +850,11 @@ export function App() {
         onEditSketch={startSketchEdit}
         canEditSketch={solverState === "ready" && !editingSketch}
         bodies={bodyList}
+        onSketchOnPlane={(id) => {
+          const f = makeSketchOnPlane(doc, id);
+          add(f);
+          startSketchEdit(f.id);
+        }}
         onPickNeutral={() => setRepickNeutral(true)}
         pickingNeutral={pickNeutral}
       />
