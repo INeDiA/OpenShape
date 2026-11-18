@@ -1,3 +1,4 @@
+import { projectEdges } from "./sketch/project";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { KernelClient } from "./kernel/client";
 import {
@@ -346,6 +347,8 @@ export function App() {
   // The 2D view of the sketch editor; the 3D camera follows it onto the sketch plane.
   const [sketchView, setSketchView] = useState<{ cx: number; cy: number; scale: number } | null>(null);
   const editingFrame = editingSketch ? sketchPreviews.find((p) => p.id === editingSketch.id)?.frame : undefined;
+  // The model's edges seen through the plane of the sketch being edited (the Project tool).
+  const projectable = useMemo(() => (mesh && editingFrame ? projectEdges(mesh, editingFrame) : []), [mesh, editingFrame]);
   const startSketchEdit = (id: string) => {
     if (solverState !== "ready") return;
     setSelectedId(id);
@@ -925,6 +928,7 @@ export function App() {
             feature={editingSketch}
             scope={resolution.scope}
             reference={sketchPreviews.find((p) => p.id === editingSketch.id)?.reference}
+            projectable={projectable}
             onCommit={(sketch) => update((cur) => updateFeature(cur, editingSketch.id, { sketch }))}
             onExit={() => {
               setEditingSketchId(null);

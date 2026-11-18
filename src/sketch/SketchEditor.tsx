@@ -4,6 +4,7 @@ import { constraintActions, CONSTRAINT_GLYPH, dimensionFor } from "./actions";
 import { addArcThrough, addCircle, addConstraint, addEllipse, addLineBetween, addPoint, addRectangle, addSpline, addTangentArc, exitDirection, tangentArcGeom } from "./builders";
 import { ellipseGeom, splineBeziers, splinePoints, type Pt } from "./curves";
 import { offsetCurves, trimCurve } from "./edit";
+import { addProjected, distanceTo, type Projected } from "./project";
 import { arcMidpoint } from "./profiles";
 import { bounds, hitTest, type Hit } from "./geometry";
 import { skId } from "./model";
@@ -12,13 +13,15 @@ import { curvePoints, entityMap, isDimension, pointOf, removeConstraints, remove
 import { solve, type DragTarget, type SolveResult } from "./solver";
 import { evalExpr, isPlainNumber, type Scope } from "../expr/expr";
 
-type Tool = "select" | "line" | "rect" | "circle" | "arc" | "tarc" | "ellipse" | "spline" | "trim";
+type Tool = "select" | "line" | "rect" | "circle" | "arc" | "tarc" | "ellipse" | "spline" | "trim" | "project";
 
 interface Props {
   feature: SketchFeature;
   scope: Scope;
   /** Edges of the face being sketched on, as 2D segment pairs (x1, y1, x2, y2). */
   reference?: Float32Array;
+  /** The model's edges seen through the sketch plane, for the Project tool. */
+  projectable?: Projected[];
   onCommit: (sketch: SketchData) => void;
   onExit: () => void;
   /** Reports the 2D view (center in sketch coordinates, pixels per mm) so the 3D camera can follow it. */
@@ -61,7 +64,7 @@ interface EditState {
 
 const SNAP_PX = 9;
 const AXIS_SNAP_DEG = 4;
-const TOOL_KEYS: Record<string, Tool> = { s: "select", l: "line", r: "rect", c: "circle", a: "arc", g: "tarc", o: "ellipse", p: "spline", k: "trim" };
+const TOOL_KEYS: Record<string, Tool> = { s: "select", l: "line", r: "rect", c: "circle", a: "arc", g: "tarc", o: "ellipse", p: "spline", k: "trim", j: "project" };
 
 /** The line or arc ending at point `id` that a tangent arc should continue (the newest one). */
 function curveEndingAt(s: SketchData, id: string): string | null {
@@ -74,7 +77,7 @@ function curveEndingAt(s: SketchData, id: string): string | null {
 
 const fmt = (v: number) => (Math.abs(v - Math.round(v)) < 1e-6 ? String(Math.round(v)) : v.toFixed(2));
 
-export function SketchEditor({ feature, scope, reference, onCommit, onExit, onViewChange }: Props) {
+export function SketchEditor({ feature, scope, reference, projectable = [], onCommit, onExit, onViewChange }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
   const [sketch, setSketch] = useState<SketchData>(feature.sketch);
@@ -195,6 +198,31 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit, onVi
 
   const cancelPending = () => setPending(null);
 
+  /** The model edge under the cursor, for the Project tool. */
+  const nearestProjectable = (x: number, y: number): Projected | null => {
+    let best: Projected | null = null, bestD = SNAP_PX / view.scale;
+    for (const c of projectable) {
+      const d = distanceTo(c, { x, y });
+      if (d < bestD) [best, bestD] = [c, d];
+    }
+    return best;
+  };
+
+  /** A projected curve as an SVG polyline (arcs and circles sampled). */
+  const projectedPoints = (c: Projected): string => {
+    let pts: { x: number; y: number }[];
+    if (c.kind === "line") pts = [c.a, c.b];
+    else if (c.kind === "spline") pts = c.closed ? [...c.points, c.points[0]] : c.points;
+    else {
+      const a0 = c.kind === "circle" ? 0 : Math.atan2(c.a.y - c.c.y, c.a.x - c.c.x);
+      let a1 = c.kind === "circle" ? 2 * Math.PI : Math.atan2(c.b.y - c.c.y, c.b.x - c.c.x);
+      if (a1 <= a0) a1 += 2 * Math.PI;
+      const n = Math.max(8, Math.ceil(((a1 - a0) / (2 * Math.PI)) * 64));
+      pts = Array.from({ length: n + 1 }, (_, i) => ({ x: c.c.x + c.r * Math.cos(a0 + ((a1 - a0) * i) / n), y: c.c.y + c.r * Math.sin(a0 + ((a1 - a0) * i) / n) }));
+    }
+    return pts.map((p) => toScreen(p.x, p.y).join(",")).join(" ");
+  };
+
   /** Commits the spline being drawn (needs two points, three when closed). */
   const finishSpline = (placed: { id: string | null; x: number; y: number }[], closed: boolean) => {
     setPending(null);
@@ -312,6 +340,13 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit, onVi
       if (r) apply(r.sketch, "arc");
       else setMessage("The three points are in line: move the cursor off the chord.");
       setPending(null);
+      return;
+    }
+
+    if (tool === "project") {
+      const c = nearestProjectable(x, y);
+      if (c) apply(addProjected(sketch, [c]).sketch, "the projection");
+      else setMessage("Click an edge of the model (dashed purple) to bring it into the sketch");
       return;
     }
 
@@ -788,6 +823,16 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit, onVi
 
   // Preview of the tool in progress.
   let preview: ReactElement | null = null;
+  if (tool === "project") {
+    const hot = cursor ? nearestProjectable(cursor.x, cursor.y) : null;
+    preview = (
+      <g>
+        {projectable.map((c, i) => (
+          <polyline key={`pj${i}`} points={projectedPoints(c)} className={`projectable${c === hot ? " hot" : ""}`} />
+        ))}
+      </g>
+    );
+  }
   if (tool === "trim" && hover && hover.kind !== "point" && cursor) {
     const r = trimCurve(sketch, hover.id, cursor.x, cursor.y);
     if (!("error" in r) && r.removed.length > 1) {
@@ -952,6 +997,7 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit, onVi
               ["ellipse", "⬭ Ellipse", "O"],
               ["spline", "∿ Spline", "P"],
               ["trim", "✂ Trim", "K"],
+              ["project", "⤓ Project", "J"],
             ] as const
           ).map(([t, label, key]) => (
             <button key={t} className={tool === t ? "active" : ""} title={`${label} (${key})`} onClick={() => (setTool(t), setPending(null))}>
@@ -959,6 +1005,17 @@ export function SketchEditor({ feature, scope, reference, onCommit, onExit, onVi
             </button>
           ))}
         </div>
+        {tool === "project" && (
+          <div className="group">
+            <button
+              disabled={!projectable.length}
+              title="Bring every edge of the model, seen through this plane, into the sketch"
+              onClick={() => apply(addProjected(sketch, projectable).sketch, "the projection")}
+            >
+              ⤓ Project all ({projectable.length})
+            </button>
+          </div>
+        )}
         <div className="group">
           {actions.map((a) => (
             <button key={a.key} title={a.shortcut ? `${a.label} (${a.shortcut.toUpperCase()})` : a.label} onClick={() => addConstraints(a.build(), a.label)}>

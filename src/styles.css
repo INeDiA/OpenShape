@@ -165,6 +165,8 @@ button.wide { width: 100%; margin: 4px 0 10px; }
 .view-bar { position: absolute; top: 10px; right: 10px; z-index: 3; display: flex; flex-wrap: wrap; justify-content: flex-end; max-width: calc(100% - 20px); gap: 4px; padding: 4px; background: rgba(255, 255, 255, 0.92); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 2px 8px rgba(29, 38, 51, 0.08); }
 .view-bar button { padding: 3px 8px; font-size: 12px; }
 .view-bar .nav-mode { margin-left: 6px; color: var(--muted); }
+.sketch-canvas .projectable { fill: none; stroke: #b14fd8; stroke-width: 1.5; stroke-dasharray: 5 3; opacity: 0.7; pointer-events: none; }
+.sketch-canvas .projectable.hot { stroke-width: 3.5; stroke-dasharray: none; opacity: 1; }
 .sketch-canvas .trim-preview { fill: none; stroke: var(--danger); stroke-width: 4; stroke-dasharray: 6 4; opacity: 0.8; pointer-events: none; }
 .sketch-canvas.tool-trim { cursor: crosshair; }
 .offset-field { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
