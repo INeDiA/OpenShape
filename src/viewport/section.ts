@@ -1,5 +1,5 @@
 // Live section view: a clipping plane through the model, with the cut filled
-// by a solid cap. The cap uses the stencil trick: drawing the clipped body's
+// by a hatched cap. The cap uses the stencil trick: drawing the clipped body's
 // back faces (+1) and front faces (-1) leaves a non-zero stencil exactly
 // where the plane is inside material, and the cap is drawn only there.
 
@@ -37,8 +37,40 @@ export function sectionRange(box: THREE.Box3 | null, axis: SectionAxis): [number
   return [box.min[k], box.max[k]];
 }
 
+/**
+ * The cut's hatching, as on a drawing: thin 45° lines over the cap colour.
+ * One tile holds one line corner to corner (plus the corner bits of its
+ * neighbours), so tiles join into continuous lines.
+ */
+function hatchTexture(): THREE.Texture | null {
+  if (typeof document === "undefined") return null;
+  const n = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = n;
+  const g = canvas.getContext("2d");
+  if (!g) return null;
+  g.fillStyle = "#e8975a";
+  g.fillRect(0, 0, n, n);
+  g.strokeStyle = "#a4552a";
+  g.lineWidth = 5;
+  g.lineCap = "square";
+  for (const k of [-n, 0, n]) {
+    g.beginPath();
+    g.moveTo(k, n);
+    g.lineTo(k + n, 0);
+    g.stroke();
+  }
+  const t = new THREE.CanvasTexture(canvas);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
+}
+const HATCH = hatchTexture();
+
 const CAP = new THREE.MeshStandardMaterial({
-  color: 0xe8975a,
+  color: HATCH ? 0xffffff : 0xe8975a,
+  map: HATCH,
   metalness: 0.05,
   roughness: 0.7,
   side: THREE.DoubleSide,
@@ -92,6 +124,12 @@ export class SectionView {
     // The cap: a square on the plane, larger than the model.
     const size = box && !box.isEmpty() ? box.getSize(new THREE.Vector3()).length() * 2 + 10 : 400;
     const cap = new THREE.Mesh(new THREE.PlaneGeometry(size, size), CAP);
+    // Hatch spacing in model mm, about 40 lines across the model (at least 1 mm).
+    if (HATCH) {
+      const diag = box && !box.isEmpty() ? box.getSize(new THREE.Vector3()).length() : 100;
+      const spacing = Math.max(1, diag / 40) * Math.SQRT2; // a tile's side for that line spacing
+      HATCH.repeat.set(size / spacing, size / spacing);
+    }
     const centre = box && !box.isEmpty() ? box.getCenter(new THREE.Vector3()) : new THREE.Vector3();
     cap.position.copy(this.plane.projectPoint(centre, new THREE.Vector3()));
     cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), this.plane.normal.clone().negate());
