@@ -277,3 +277,13 @@ button:has(> .icon) { display: inline-flex; align-items: center; gap: 5px; }
 .num-with-suffix input { width: 80px; }
 .num-with-suffix .suffix { color: var(--muted); font-size: 11px; min-width: 34px; }
 .bed-warning { top: auto; bottom: 48px; color: var(--danger); border-color: var(--danger); }
+
+/* Export dialog. */
+.format-list { display: grid; gap: 4px; }
+.format-option { display: grid; grid-template-columns: auto 64px 1fr; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
+.format-option.chosen { border-color: var(--accent); background: #eef4ff; }
+.format-option input { margin: 0; }
+.segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.segmented button { border: none; border-radius: 0; border-right: 1px solid var(--border); }
+.segmented button:last-child { border-right: none; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }

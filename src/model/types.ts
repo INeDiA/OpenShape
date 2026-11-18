@@ -408,10 +408,20 @@ export interface Measurement {
   body?: { volume: number; area: number; size: [number, number, number] };
 }
 
+/** Tessellation of exported meshes: chord tolerance and angle (draft 0.05 mm / 15°, normal 0.01 / 5°, fine 0.002 / 2°). */
+export type MeshQuality = "draft" | "normal" | "fine";
+
+/** One body's triangles for a mesh export. */
+export interface ExportPart {
+  id: BodyId;
+  vertices: Float32Array;
+  triangles: Uint32Array;
+}
+
 export type KernelRequest =
   | { kind: "evaluate"; seq: number; doc: Document; stopBefore?: string; preview?: boolean }
   | { kind: "measure"; seq: number; doc: Document; selection: MeasureSelection }
-  | { kind: "export"; seq: number; doc: Document; format: "step" | "mesh" }
+  | { kind: "export"; seq: number; doc: Document; format: "step" | "mesh"; bodies?: BodyId[]; quality?: MeshQuality }
   | { kind: "project"; seq: number; doc: Document; dirs: ViewDir[] };
 
 export type KernelResponse =
@@ -430,4 +440,4 @@ export type KernelResponse =
     }
   | { kind: "measured"; seq: number; measurement?: Measurement; error?: string }
   | { kind: "projected"; seq: number; views?: ViewProjection[]; error?: string }
-  | { kind: "exported"; seq: number; blob?: Blob; mesh?: { vertices: Float32Array; triangles: Uint32Array }; error?: string };
+  | { kind: "exported"; seq: number; blob?: Blob; parts?: ExportPart[]; error?: string };

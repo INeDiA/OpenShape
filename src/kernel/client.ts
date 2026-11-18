@@ -1,4 +1,4 @@
-import type { Document, KernelRequest, KernelResponse, Measurement, MeasureSelection, ViewDir, ViewProjection } from "../model/types";
+import type { BodyId, Document, ExportPart, KernelRequest, KernelResponse, Measurement, MeasureSelection, MeshQuality, ViewDir, ViewProjection } from "../model/types";
 
 type Evaluated = Extract<KernelResponse, { kind: "evaluated" }>;
 
@@ -76,13 +76,14 @@ export class KernelClient {
     this.send({ kind: "evaluate", seq, doc, stopBefore, preview });
   }
 
-  exportSTEP(doc: Document): Promise<Blob> {
-    return this.request(doc, "step").then((r) => r.blob!);
+  /** STEP of the chosen bodies (all when `bodies` is empty). */
+  exportSTEP(doc: Document, bodies?: BodyId[]): Promise<Blob> {
+    return this.request(doc, "step", bodies).then((r) => r.blob!);
   }
 
-  /** Fine tessellation for mesh formats (STL, 3MF, ...). */
-  exportMesh(doc: Document): Promise<{ vertices: Float32Array; triangles: Uint32Array }> {
-    return this.request(doc, "mesh").then((r) => r.mesh!);
+  /** Tessellation for mesh formats (STL, 3MF, ...), one part per chosen body. */
+  exportMesh(doc: Document, bodies?: BodyId[], quality?: MeshQuality): Promise<ExportPart[]> {
+    return this.request(doc, "mesh", bodies, quality).then((r) => r.parts!);
   }
 
   /** Measures faces/edges/a body of the final model of `doc`. */
@@ -103,11 +104,11 @@ export class KernelClient {
     });
   }
 
-  private request(doc: Document, format: "step" | "mesh") {
+  private request(doc: Document, format: "step" | "mesh", bodies?: BodyId[], quality?: MeshQuality) {
     const seq = ++this.seq;
     return new Promise<Extract<KernelResponse, { kind: "exported" }>>((resolve, reject) => {
       this.pendingExports.set(seq, (r) => (r.error ? reject(new Error(r.error)) : resolve(r)));
-      this.send({ kind: "export", seq, doc, format });
+      this.send({ kind: "export", seq, doc, format, bodies, quality });
     });
   }
 

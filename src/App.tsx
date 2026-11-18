@@ -36,7 +36,8 @@ import { resolveDocument, type SketchSolver } from "./model/resolve";
 import { VariablesPanel } from "./ui/VariablesPanel";
 import { DrawingWorkspace } from "./drawing/DrawingWorkspace";
 import { useManipulation, type ContextActions } from "./ui/useManipulation";
-import { EXPORT_FORMATS, exportMesh, type ExportFormat } from "./io/exporters";
+import { exportBodies } from "./io/exporters";
+import { ExportDialog, type ExportOptions } from "./io/ExportDialog";
 import type { FileMeta } from "./io/fileFormat";
 import { downloadBlob, GENERATOR, autosaveProblem, loadAutosave, loadHistory, openDocument, resetFileHandle, saveDocument, writeAutosave, writeHistory } from "./io/storage";
 
@@ -451,14 +452,28 @@ export function App() {
     setTimeout(() => setNotice((n) => (n === msg ? null : n)), 4000);
   };
 
-  const exportAs = async (format: ExportFormat) => {
+  // Export: format, bodies, one file or one per body, mesh quality (from the export dialog).
+  const [exportDialog, setExportDialog] = useState(false);
+  const exportWith = async (o: ExportOptions) => {
     const k = kernel.current!;
-    const info = EXPORT_FORMATS.find((f) => f.id === format)!;
     const name = baseName(fileName);
+    const bodyLabel = (id: string) => doc.features.find((f) => f.id === id)?.name ?? "Body";
+    // A single body exported alone is named after it.
+    const fileBase = o.bodies.length === 1 ? `${name} - ${bodyLabel(o.bodies[0])}` : name;
     try {
-      const blob = format === "step" ? await k.exportSTEP(doc) : await exportMesh(await k.exportMesh(doc), format, name);
-      downloadBlob(blob, `${name}.${info.ext}`);
-      flash(`Exported ${name}.${info.ext}`);
+      if (o.format === "step") {
+        downloadBlob(await k.exportSTEP(doc, o.bodies), `${fileBase}.step`);
+        return flash(`Exported ${fileBase}.step`);
+      }
+      const parts = await k.exportMesh(doc, o.bodies, o.quality);
+      const { blob, fileName: out } = await exportBodies(
+        parts.map((p) => ({ name: bodyLabel(p.id), mesh: p })),
+        o.format,
+        fileBase,
+        o.separate,
+      );
+      downloadBlob(blob, out);
+      flash(`Exported ${out}`);
     } catch (e) {
       flash(`Export failed: ${e instanceof Error ? e.message : e}`);
     }
@@ -576,15 +591,14 @@ export function App() {
         { id: "saveas", label: "Save as…", icon: "saveAs", shortcut: "⇧⌘S", run: () => save(true) },
         "separator",
         { id: "import", label: "Import STEP or STL…", icon: "import", run: importFile },
-        { heading: "Export" },
-        ...EXPORT_FORMATS.map((f) => ({
-          id: `export-${f.id}`,
-          label: `${f.label}`,
+        {
+          id: "export",
+          label: "Export…",
           icon: "export" as const,
-          title: f.hint,
+          title: "STL, 3MF, STEP, OBJ, PLY, glTF: all bodies or some, one file or one per body",
           disabled: kernelState !== "ready" || !mesh,
-          run: () => exportAs(f.id as ExportFormat),
-        })),
+          run: () => setExportDialog(true),
+        },
       ],
     },
   ];
@@ -780,6 +794,7 @@ export function App() {
           </button>
         </div>
       </header>
+      {exportDialog && <ExportDialog bodies={bodyList} preselected={sel.body} onExport={exportWith} onClose={() => setExportDialog(false)} />}
       {printerDialog && <PrinterDialog profile={printer} onChange={setPrinter} onClose={() => setPrinterDialog(false)} />}
       {palette && <CommandPalette groups={[...fileMenus, ...toolMenus]} onClose={() => setPalette(false)} />}
 

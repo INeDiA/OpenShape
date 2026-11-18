@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { strFromU8, unzipSync } from "fflate";
-import { eulerCharacteristic, to3MF, toOBJ, toPLY, toSTL, weld, type RawMesh } from "./exporters";
+import { eulerCharacteristic, exportBodies, mergeMeshes, to3MF, toOBJ, toPLY, toSTL, weld, type RawMesh } from "./exporters";
 
 // Unit cube as 6 faces x 2 triangles with per-face (unshared) vertices, like a kernel mesh.
 function cube(): RawMesh {
@@ -53,5 +53,44 @@ describe("mesh export", () => {
     const header = strFromU8(ply.slice(0, 200));
     expect(header).toContain("element vertex 8");
     expect(header).toContain("element face 12");
+  });
+});
+
+describe("exporting several bodies", () => {
+  const moved = (dx: number): RawMesh => {
+    const c = cube();
+    const v = new Float32Array(c.vertices);
+    for (let i = 0; i < v.length; i += 3) v[i] += dx;
+    return { vertices: v, triangles: c.triangles };
+  };
+
+  it("merges bodies into one mesh, shifting the indices", () => {
+    const m = mergeMeshes([cube(), moved(20)]);
+    expect(m.vertices.length).toBe(cube().vertices.length * 2);
+    expect(Math.max(...m.triangles)).toBe(m.vertices.length / 3 - 1);
+    const w = weld(m);
+    // Two separate closed cubes: Euler characteristic 2 each.
+    expect(eulerCharacteristic(w)).toBe(4);
+  });
+
+  it("writes one 3MF object per body", async () => {
+    const { blob, fileName } = await exportBodies([{ name: "Base", mesh: cube() }, { name: "Lid", mesh: moved(20) }], "3mf", "Box", true);
+    expect(fileName).toBe("Box.3mf");
+    const model = strFromU8(unzipSync(new Uint8Array(await blob.arrayBuffer()))["3D/3dmodel.model"]);
+    expect(model.match(/<object /g)?.length).toBe(2);
+    expect(model).toContain('name="Lid"');
+    expect(model.match(/<item objectid=/g)?.length).toBe(2);
+  });
+
+  it("zips one file per body for other formats, or merges them when asked", async () => {
+    const parts = [{ name: "Base", mesh: cube() }, { name: "Lid/top", mesh: moved(20) }, { name: "Base", mesh: moved(40) }];
+    const { blob, fileName } = await exportBodies(parts, "stl", "Box", true);
+    expect(fileName).toBe("Box (STL).zip");
+    const files = Object.keys(unzipSync(new Uint8Array(await blob.arrayBuffer()))).sort();
+    expect(files).toEqual(["Base 2.stl", "Base.stl", "Lid-top.stl"]);
+    const one = await exportBodies(parts, "stl", "Box", false);
+    expect(one.fileName).toBe("Box.stl");
+    // 12 triangles per cube.
+    expect(new DataView(await one.blob.arrayBuffer()).getUint32(80, true)).toBe(36);
   });
 });

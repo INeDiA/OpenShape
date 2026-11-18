@@ -78,27 +78,34 @@ export function toSTL(m: IndexedMesh, name = "OpenShape"): Blob {
   return new Blob([buf], { type: "model/stl" });
 }
 
-/** 3MF core spec: a zip with the content-types, relationships and model XML. */
-export function to3MF(m: IndexedMesh, name = "OpenShape"): Blob {
+/**
+ * 3MF core spec: a zip with the content-types, relationships and model XML.
+ * Each mesh becomes its own object (slicers list them as separate parts).
+ */
+export function to3MF(meshes: IndexedMesh | { name: string; mesh: IndexedMesh }[], name = "OpenShape"): Blob {
+  const list = Array.isArray(meshes) ? meshes : [{ name, mesh: meshes }];
   const f = (v: number) => (Math.round(v * 1e6) / 1e6).toString();
-  const verts: string[] = [];
-  for (let i = 0; i < m.positions.length; i += 3) verts.push(`<vertex x="${f(m.positions[i])}" y="${f(m.positions[i + 1])}" z="${f(m.positions[i + 2])}"/>`);
-  const tris: string[] = [];
-  for (let i = 0; i < m.indices.length; i += 3) tris.push(`<triangle v1="${m.indices[i]}" v2="${m.indices[i + 1]}" v3="${m.indices[i + 2]}"/>`);
   const esc = (s: string) => s.replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" })[c]!);
+  const objects = list.map(({ name: objName, mesh: m }, k) => {
+    const verts: string[] = [];
+    for (let i = 0; i < m.positions.length; i += 3) verts.push(`<vertex x="${f(m.positions[i])}" y="${f(m.positions[i + 1])}" z="${f(m.positions[i + 2])}"/>`);
+    const tris: string[] = [];
+    for (let i = 0; i < m.indices.length; i += 3) tris.push(`<triangle v1="${m.indices[i]}" v2="${m.indices[i + 1]}" v3="${m.indices[i + 2]}"/>`);
+    return `<object id="${k + 1}" type="model" name="${esc(objName)}">
+<mesh>
+<vertices>${verts.join("")}</vertices>
+<triangles>${tris.join("")}</triangles>
+</mesh>
+</object>`;
+  });
   const model = `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
 <metadata name="Application">OpenShape</metadata>
 <metadata name="Title">${esc(name)}</metadata>
 <resources>
-<object id="1" type="model" name="${esc(name)}">
-<mesh>
-<vertices>${verts.join("")}</vertices>
-<triangles>${tris.join("")}</triangles>
-</mesh>
-</object>
+${objects.join("\n")}
 </resources>
-<build><item objectid="1"/></build>
+<build>${list.map((_, k) => `<item objectid="${k + 1}"/>`).join("")}</build>
 </model>`;
   const contentTypes = `<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -176,6 +183,40 @@ export async function exportMesh(raw: RawMesh, format: MeshFormat, name: string)
     case "glb":
       return toGLB(m, name);
   }
+}
+
+/** Several meshes as one (indices shifted). */
+export function mergeMeshes(parts: RawMesh[]): RawMesh {
+  const nv = parts.reduce((s, p) => s + p.vertices.length, 0), nt = parts.reduce((s, p) => s + p.triangles.length, 0);
+  const vertices = new Float32Array(nv), triangles = new Uint32Array(nt);
+  let ov = 0, ot = 0;
+  for (const p of parts) {
+    vertices.set(p.vertices, ov);
+    for (let i = 0; i < p.triangles.length; i++) triangles[ot + i] = p.triangles[i] + ov / 3;
+    ov += p.vertices.length;
+    ot += p.triangles.length;
+  }
+  return { vertices, triangles };
+}
+
+/** A file name without characters file systems dislike. */
+const safe = (s: string) => s.replace(/[\\/:*?"<>|]+/g, "-").trim() || "body";
+
+/**
+ * Bodies to a single download: merged into one mesh, or kept apart (3MF:
+ * one object each in the same file; other formats: one file each, zipped).
+ */
+export async function exportBodies(parts: { name: string; mesh: RawMesh }[], format: MeshFormat, name: string, separate: boolean): Promise<{ blob: Blob; fileName: string }> {
+  const ext = EXPORT_FORMATS.find((f) => f.id === format)!.ext;
+  if (!separate || parts.length === 1) return { blob: await exportMesh(mergeMeshes(parts.map((p) => p.mesh)), format, name), fileName: `${name}.${ext}` };
+  if (format === "3mf") return { blob: to3MF(parts.map((p) => ({ name: p.name, mesh: weld(p.mesh) })), name), fileName: `${name}.3mf` };
+  const files: Record<string, Uint8Array> = {};
+  for (const p of parts) {
+    let file = `${safe(p.name)}.${ext}`;
+    for (let k = 2; files[file]; k++) file = `${safe(p.name)} ${k}.${ext}`;
+    files[file] = new Uint8Array(await (await exportMesh(p.mesh, format, p.name)).arrayBuffer());
+  }
+  return { blob: new Blob([zipSync(files)], { type: "application/zip" }), fileName: `${name} (${ext.toUpperCase()}).zip` };
 }
 
 /** Euler characteristic check used by tests: a closed genus-0 shell has V - E + F = 2. */
