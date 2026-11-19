@@ -129,6 +129,10 @@ function constraintPrimitive(c: SkConstraint, m: ReturnType<typeof entityMap>): 
       const l = m.get(c.line) as SkLine;
       return { id, type: "p2p_symmetric_ppp", p1_id: l.p1, p2_id: l.p2, p_id: c.point };
     }
+    case "symmetric":
+      return { id, type: "p2p_symmetric_ppl", p1_id: c.a, p2_id: c.b, l_id: c.line };
+    case "pointLine":
+      return { id, type: "p2l_distance", p_id: c.point, l_id: c.line, distance: c.value };
     case "distance":
       return { id, type: "p2p_distance", p1_id: c.a, p2_id: c.b, distance: c.value };
     case "length": {

@@ -73,10 +73,14 @@ export type SkConstraint =
   // `line` may also be an arc: then the two arcs are tangent.
   | { id: string; kind: "tangent"; line: string; circle: string }
   | { id: string; kind: "midpoint"; point: string; line: string }
+  // Points `a` and `b` mirror each other across `line`.
+  | { id: string; kind: "symmetric"; a: string; b: string; line: string }
   // Curves `a` and `b` (lines or arcs) meet at `point` with the same direction; `reversed` when their parametric directions are opposite.
   | { id: string; kind: "tangentAt"; a: string; b: string; point: string; reversed: boolean }
   | { id: string; kind: "distance"; a: string; b: string; value: number; expr?: string } // point-point
   | { id: string; kind: "length"; line: string; value: number; expr?: string }
+  // Distance from a point to the (infinite) line; also between parallel lines (a point of one, the other line).
+  | { id: string; kind: "pointLine"; point: string; line: string; value: number; expr?: string }
   | { id: string; kind: "radius"; circle: string; value: number; expr?: string }
   | { id: string; kind: "angle"; a: string; b: string; value: number; expr?: string }; // degrees, line-line
 
@@ -128,7 +132,10 @@ export function constraintRefs(c: SkConstraint): string[] {
       return [c.line];
     case "pointOnLine":
     case "midpoint":
+    case "pointLine":
       return [c.point, c.line];
+    case "symmetric":
+      return [c.a, c.b, c.line];
     case "pointOnCircle":
       return [c.point, c.circle];
     case "tangent":
@@ -204,6 +211,11 @@ export function measure(s: SketchData, c: DistributiveOmit<DimensionConstraint, 
     }
     case "radius":
       return (m.get(c.circle) as SkCircle).radius;
+    case "pointLine": {
+      const l = line(c.line), p = pt(c.point), a = pt(l.p1), b = pt(l.p2);
+      const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+      return Math.abs((p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x)) / len;
+    }
     case "angle": {
       const dir = (l: SkLine) => {
         const a = pt(l.p1), b = pt(l.p2);

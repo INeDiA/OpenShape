@@ -404,3 +404,65 @@ export function offsetCurves(s: SketchData, ids: Iterable<string>, distance: num
   }
   return { sketch: b.sketch, ids: created };
 }
+
+/**
+ * Copies of the curves `ids`, `count - 1` of them, the k-th with every point
+ * moved by `place(x, y, k)`. Points the curves share stay shared within each
+ * copy. Copies are free geometry: the originals' constraints aren't repeated.
+ */
+export function patternCurves(s: SketchData, ids: Iterable<string>, count: number, place: (x: number, y: number, k: number) => Pt): { sketch: SketchData; ids: string[] } {
+  const m = entityMap(s);
+  const curves = [...ids].map((id) => m.get(id)).filter((e): e is SkCurve => !!e && e.kind !== "point");
+  const entities: SkEntity[] = [...s.entities];
+  const added: string[] = [];
+  for (let k = 1; k < Math.round(count); k++) {
+    const copyOf = new Map<string, string>();
+    const pt = (id: string) => {
+      let to = copyOf.get(id);
+      if (!to) {
+        const p = pointOf(m, id);
+        const [x, y] = place(p.x, p.y, k);
+        to = skId("p");
+        entities.push({ id: to, kind: "point", x, y });
+        copyOf.set(id, to);
+      }
+      return to;
+    };
+    for (const c of curves) {
+      const id = skId({ line: "l", circle: "k", arc: "a", ellipse: "e", spline: "s" }[c.kind]);
+      let copy: SkCurve;
+      switch (c.kind) {
+        case "line":
+          copy = { ...c, id, p1: pt(c.p1), p2: pt(c.p2) };
+          break;
+        case "circle":
+          copy = { ...c, id, center: pt(c.center) };
+          break;
+        case "arc":
+          copy = { ...c, id, center: pt(c.center), start: pt(c.start), end: pt(c.end) };
+          break;
+        case "ellipse":
+          copy = { ...c, id, center: pt(c.center), major: pt(c.major), minor: pt(c.minor) };
+          break;
+        case "spline":
+          copy = { ...c, id, points: c.points.map(pt) };
+          break;
+      }
+      entities.push(copy);
+      added.push(id);
+    }
+  }
+  return { sketch: { ...s, entities }, ids: added };
+}
+
+/** Moves for a linear pattern: `dx`, `dy` between copies. */
+export const linearPlace = (dx: number, dy: number) => (x: number, y: number, k: number): Pt => [x + dx * k, y + dy * k];
+
+/** Moves for a circular pattern of `count` copies over `angle` degrees about (cx, cy); a full turn spaces them evenly. */
+export function circularPlace(cx: number, cy: number, count: number, angle = 360) {
+  const step = (Math.abs(angle) >= 360 ? 360 / count : angle / Math.max(1, count - 1)) * (Math.PI / 180);
+  return (x: number, y: number, k: number): Pt => {
+    const c = Math.cos(step * k), s = Math.sin(step * k);
+    return [cx + (x - cx) * c - (y - cy) * s, cy + (x - cx) * s + (y - cy) * c];
+  };
+}

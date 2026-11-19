@@ -145,13 +145,19 @@ Constraints (`kind` and fields):
 | `parallel`, `perpendicular` | `a`, `b` (lines) |
 | `equal` | `a`, `b` (two lines or two circles) |
 | `pointOnLine`, `midpoint` | `point`, `line` |
+| `symmetric` | `a`, `b` (points mirrored across `line`) |
 | `pointOnCircle` | `point`, `circle` (a circle or an arc) |
 | `tangent` | `line` (a line or an arc), `circle` (a circle or an arc) |
 | `tangentAt` | `a`, `b` (lines or arcs), `point` (where they meet), `reversed` (their directions are opposite: lines run `p1`→`p2`, arcs counter-clockwise) |
 | `distance` | `a`, `b` (points), `value`, `expr?` |
 | `length` | `line`, `value`, `expr?` |
+| `pointLine` | `point`, `line` (distance to the infinite line; between parallel lines it uses a point of one), `value`, `expr?` |
 | `radius` | `circle` (a circle or an arc), `value`, `expr?` |
 | `angle` | `a`, `b` (lines), `value` (degrees), `expr?` |
+
+Concentric curves are stored as a `coincident` between their centres, and an
+ellipse's semi-axes as `distance` between its centre and an axis point. Sketch
+patterns store their copies as ordinary curves.
 
 Stored point coordinates are the last solved positions, so a reader can display a
 sketch without running a constraint solver.

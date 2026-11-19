@@ -170,6 +170,9 @@ button.wide { width: 100%; margin: 4px 0 10px; }
 .sketch-canvas .trim-preview { fill: none; stroke: var(--danger); stroke-width: 4; stroke-dasharray: 6 4; opacity: 0.8; pointer-events: none; }
 .sketch-canvas.tool-trim { cursor: crosshair; }
 .offset-field { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+.pattern-field select { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 5px; }
+.pattern-field label { display: inline-flex; align-items: center; gap: 2px; }
+.offset-field.pattern-field input { width: 44px; }
 .offset-field input { width: 56px; font: inherit; padding: 3px 5px; border: 1px solid var(--accent); border-radius: 5px; }
 .measure-panel { position: absolute; left: 12px; bottom: 12px; z-index: 3; min-width: 200px; max-width: 280px; padding: 8px 10px; background: color-mix(in srgb, var(--panel) 94%, transparent); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 2px 10px rgba(20, 30, 50, 0.08); font-size: 12px; }
 .measure-title { display: flex; justify-content: space-between; font-weight: 600; margin-bottom: 4px; }

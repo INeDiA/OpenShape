@@ -3,7 +3,7 @@ import type { SketchFeature } from "../model/types";
 import { constraintActions, CONSTRAINT_GLYPH, dimensionFor } from "./actions";
 import { addArcThrough, addCircle, addConstraint, addEllipse, addLineBetween, addPoint, addRectangle, addSpline, addTangentArc, exitDirection, tangentArcGeom } from "./builders";
 import { ellipseGeom, splineBeziers, splinePoints, type Pt } from "./curves";
-import { offsetCurves, trimCurve } from "./edit";
+import { circularPlace, linearPlace, offsetCurves, patternCurves, trimCurve } from "./edit";
 import { addProjected, distanceTo, type Projected } from "./project";
 import { arcMidpoint } from "./profiles";
 import { bounds, hitTest, type Hit } from "./geometry";
@@ -91,6 +91,8 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
   const [edit, setEdit] = useState<EditState | null>(null);
   /** Offset distance being typed (null when the offset field is closed). */
   const [offsetText, setOffsetText] = useState<string | null>(null);
+  /** Pattern being set up for the selected curves (null when its fields are closed). */
+  const [patternForm, setPatternForm] = useState<{ mode: "linear" | "circular"; count: string; dx: string; dy: string; angle: string } | null>(null);
   const drag = useRef<DragState | null>(null);
   const pan = useRef<{ x: number; y: number; cx: number; cy: number } | null>(null);
 
@@ -529,6 +531,49 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
     }
   };
 
+  /** Copies the selected curves in a row or around the selected point (the origin when none is selected). */
+  const applyPattern = () => {
+    if (!patternForm) return;
+    const num = (t: string) => {
+      const v = t.trim().replace(",", ".");
+      return isPlainNumber(v) ? Number(v) : evalExpr(v, scope);
+    };
+    let count: number, place: (x: number, y: number, k: number) => Pt;
+    try {
+      count = Math.round(num(patternForm.count));
+      if (!(count >= 2 && count <= 100)) throw new Error("Count must be 2–100");
+      if (patternForm.mode === "linear") place = linearPlace(num(patternForm.dx), num(patternForm.dy));
+      else {
+        const centre = [...selection].map((id) => m.get(id)).find((e) => e?.kind === "point");
+        const c = centre?.kind === "point" ? centre : { x: 0, y: 0 };
+        place = circularPlace(c.x, c.y, count, num(patternForm.angle));
+      }
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    const curves = [...selection].filter((id) => ["line", "circle", "arc", "ellipse", "spline"].includes(m.get(id)?.kind ?? ""));
+    const r = patternCurves(sketch, curves, count, place);
+    if (apply(r.sketch, "pattern")) {
+      setPatternForm(null);
+      setSelection(new Set(r.ids));
+    }
+  };
+
+  /** Starting values for a linear pattern: copies side by side, a little apart. */
+  const openPattern = () => {
+    const curves = [...selection].filter((id) => m.get(id)?.kind !== "point");
+    const pts = curves.flatMap((id) => {
+      const e = m.get(id);
+      if (!e || e.kind === "point") return [];
+      const r = e.kind === "circle" || e.kind === "arc" ? e.radius : 0;
+      return curvePoints(e).flatMap((p) => [{ x: pointOf(m, p).x - r }, { x: pointOf(m, p).x + r }]);
+    });
+    const xs = pts.map((p) => p.x);
+    const w = pts.length ? Math.max(...xs) - Math.min(...xs) : 10;
+    setPatternForm({ mode: "linear", count: "3", dx: fmt(Math.max(5, w + 5)), dy: "0", angle: "360" });
+  };
+
   const applyOffset = () => {
     if (offsetText == null) return;
     const src = offsetText.trim().replace(",", ".");
@@ -762,9 +807,14 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
       case "tangentAt":
         glyphAtPoint(c, c.point, g);
         break;
+      case "symmetric":
+        glyphAtPoint(c, c.a, g);
+        glyphAtPoint(c, c.b, g);
+        break;
       case "length":
       case "distance":
       case "radius":
+      case "pointLine":
       case "angle": {
         let sx = 0, sy = 0, text = c.expr ? `ƒ ${fmt(c.value)}` : fmt(c.value);
         let leader: ReactElement | null = null;
@@ -775,6 +825,24 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
           sx = f.mx + f.nx * 38;
           sy = f.my + f.ny * 38;
           if (c.kind === "angle") text = `${text}°`;
+        } else if (c.kind === "pointLine") {
+          // From the point square onto the line (extended as needed).
+          const l = m.get(c.line) as SkLine | undefined;
+          if (!l) break;
+          const p = pointOf(m, c.point), a = pointOf(m, l.p1), b = pointOf(m, l.p2);
+          const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+          const ux = (b.x - a.x) / len, uy = (b.y - a.y) / len;
+          const t = (p.x - a.x) * ux + (p.y - a.y) * uy;
+          const [px, py] = toScreen(p.x, p.y), [fx, fy] = toScreen(a.x + ux * t, a.y + uy * t);
+          sx = (px + fx) / 2 + 12;
+          sy = (py + fy) / 2 - 12;
+          const [ex1, ey1] = toScreen(a.x + ux * Math.min(0, t), a.y + uy * Math.min(0, t)), [ex2, ey2] = toScreen(a.x + ux * Math.max(len, t), a.y + uy * Math.max(len, t));
+          leader = (
+            <>
+              <line x1={px} y1={py} x2={fx} y2={fy} className="dim-line" />
+              {(t < 0 || t > len) && <line x1={ex1} y1={ey1} x2={ex2} y2={ey2} className="dim-line extension" />}
+            </>
+          );
         } else if (c.kind === "distance") {
           const a = pointOf(m, c.a), b = pointOf(m, c.b);
           const [ax, ay] = toScreen(a.x, a.y), [bx, by] = toScreen(b.x, b.y);
@@ -1052,6 +1120,43 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
                 />
                 <button onClick={applyOffset}>✓</button>
               </label>
+            ))}
+          {[...selection].some((id) => ["line", "circle", "arc", "ellipse", "spline"].includes(m.get(id)?.kind ?? "")) &&
+            (patternForm == null ? (
+              <button title="Copies of the selected curves in a row, or around the selected point" onClick={openPattern}>
+                ⁙ Pattern
+              </button>
+            ) : (
+              <span
+                className="offset-field pattern-field"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") applyPattern();
+                  if (e.key === "Escape") setPatternForm(null);
+                }}
+              >
+                <select value={patternForm.mode} onChange={(e) => setPatternForm({ ...patternForm, mode: e.target.value as "linear" | "circular" })} aria-label="Pattern type">
+                  <option value="linear">Linear</option>
+                  <option value="circular">Circular</option>
+                </select>
+                <label title="Total number, the originals included">
+                  ×<input autoFocus value={patternForm.count} onChange={(e) => setPatternForm({ ...patternForm, count: e.target.value })} aria-label="Count" />
+                </label>
+                {patternForm.mode === "linear" ? (
+                  <>
+                    <label title="Step along X between copies (mm)">
+                      X<input value={patternForm.dx} onChange={(e) => setPatternForm({ ...patternForm, dx: e.target.value })} aria-label="Step X" />
+                    </label>
+                    <label title="Step along Y between copies (mm)">
+                      Y<input value={patternForm.dy} onChange={(e) => setPatternForm({ ...patternForm, dy: e.target.value })} aria-label="Step Y" />
+                    </label>
+                  </>
+                ) : (
+                  <label title="Total angle; 360 spaces the copies evenly all round. Centre: the selected point, or the origin">
+                    ∠<input value={patternForm.angle} onChange={(e) => setPatternForm({ ...patternForm, angle: e.target.value })} aria-label="Angle" />°
+                  </label>
+                )}
+                <button onClick={applyPattern}>✓</button>
+              </span>
             ))}
           {selection.size > 0 && (
             <button title="Delete (⌫)" onClick={deleteSelection}>
