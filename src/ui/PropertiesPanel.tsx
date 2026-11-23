@@ -49,6 +49,9 @@ interface Props {
   /** Draft: pick the neutral face again in the viewport. */
   onPickNeutral: () => void;
   pickingNeutral: boolean;
+  /** Revolve: pick its axis again by clicking a line in the view. */
+  onPickAxis?: () => void;
+  pickingAxis?: boolean;
 }
 
 function Check({ label, checked, onChange, title }: { label: string; checked: boolean; onChange: (v: boolean) => void; title?: string }) {
@@ -109,7 +112,7 @@ const PLANES: [PlaneName, string][] = [
   ["YZ", "YZ (right)"],
 ];
 
-export function PropertiesPanel({ feature: f, sketches, status, onChange, onEditSketch, canEditSketch, scope, bodies, onSketchOnPlane, onPickNeutral, pickingNeutral }: Props) {
+export function PropertiesPanel({ feature: f, sketches, status, onChange, onEditSketch, canEditSketch, scope, bodies, onSketchOnPlane, onPickNeutral, pickingNeutral, onPickAxis, pickingAxis }: Props) {
   const sketchOptions = sketches.map((s) => [s.id, s.name] as [string, string]);
   if (!f) {
     return (
@@ -174,6 +177,11 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
                 ]}
                 onChange={(v) => onChange(v === "X" || v === "Y" || v === "Z" ? { axis: v, axisLine: undefined } : { axisLine: v })}
               />
+              {onPickAxis && (
+                <button className="pick-axis" disabled={pickingAxis} onClick={onPickAxis} title="Click a line of the sketch, or a world axis, in the view">
+                  {pickingAxis ? "Click the axis in the view…" : "↗ Pick axis in view"}
+                </button>
+              )}
               <Field label="Angle °" feature={f} field="angle" scope={scope} min={0.01} onChange={onChange} />
             </>
           )}

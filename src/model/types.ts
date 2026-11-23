@@ -26,6 +26,22 @@ export interface SketchFeature extends FeatureBase {
   /** Distance along the plane normal. */
   offset: number;
   sketch: SketchData;
+  /** Pictures shown under the sketch to trace over; they never become geometry. */
+  images?: SketchImage[];
+}
+
+/** A reference picture placed on the sketch plane (axis-aligned, centred at x, y). */
+export interface SketchImage {
+  id: string;
+  /** Data URL (JPEG or PNG), downscaled on import. */
+  src: string;
+  x: number;
+  y: number;
+  /** Size on the plane, mm. */
+  width: number;
+  height: number;
+  /** 0–1. */
+  opacity: number;
 }
 
 export type BooleanOp = "new" | "join" | "cut" | "intersect";

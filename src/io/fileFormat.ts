@@ -110,6 +110,17 @@ export function validateDocument(raw: unknown): Document {
         if (f.face !== undefined) str(f.face, `${at}.face`);
         if (f.planeId !== undefined) need(planeIds.has(f.planeId as string), `${at} references a plane that doesn't precede it`);
         validateSketch(f.sketch, `${at}.sketch`);
+        if (f.images !== undefined) {
+          need(Array.isArray(f.images), `${at}.images must be a list`);
+          for (const [k, im] of (f.images as unknown[]).entries()) {
+            const w = `${at}.images[${k}]`;
+            need(isObj(im), `${w} is not an object`);
+            str(im.id, `${w}.id`);
+            need(typeof im.src === "string" && /^data:image\/(png|jpeg|webp);base64,/.test(im.src), `${w}.src must be a PNG, JPEG or WebP data URL`);
+            for (const key of ["x", "y", "width", "height", "opacity"]) num(im[key], `${w}.${key}`);
+            need((im.width as number) > 0 && (im.height as number) > 0, `${w} must have a positive size`);
+          }
+        }
         sketchIds.add(f.id as string);
         break;
       case "extrude":

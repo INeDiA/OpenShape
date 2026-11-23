@@ -126,7 +126,7 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
 
   const active = doc.features.find((f) => f.id === activeId) ?? null;
   /** Revolve waiting for its axis: nothing is created until one is picked. */
-  const [axisPick, setAxisPick] = useState<{ sketch: string; regions?: string[] } | null>(null);
+  const [axisPick, setAxisPick] = useState<{ sketch: string; regions?: string[]; /** Existing revolve whose axis is being changed. */ edit?: string } | null>(null);
   /** Revolve with its axis chosen, waiting for an angle (dragged or typed); not in the document yet. */
   const [pendingRevolve, setPendingRevolve] = useState<RevolveFeature | null>(null);
   const clear = useCallback(() => {
@@ -515,6 +515,14 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     setAxisPick({ sketch, regions });
   }, []);
 
+  /** Picks a new axis for an existing revolve in the view. */
+  const repickAxis = useCallback((revolve: RevolveFeature) => {
+    setSelection(EMPTY);
+    setActiveId(null);
+    setPendingRevolve(null);
+    setAxisPick({ sketch: revolve.sketchId, regions: revolve.regions, edit: revolve.id });
+  }, []);
+
   /** Lines that can be the axis: the sketch's lines, then the world axes through the origin. */
   const axisCandidates = useMemo<AxisCandidate[]>(() => {
     if (!axisPick) return [];
@@ -542,6 +550,12 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
 
   const pickAxis = (id: string) => {
     if (!axisPick) return;
+    if (axisPick.edit) {
+      const world = id === "X" || id === "Y" || id === "Z";
+      commit(updateFeature(doc, axisPick.edit, (world ? { axis: id, axisLine: undefined } : { axisLine: id }) as Partial<Feature>));
+      setAxisPick(null);
+      return;
+    }
     const sk = sketches.find((x) => x.id === axisPick.sketch);
     const r = sk?.regions.find((x) => x.id === axisPick.regions?.[0]) ?? sk?.regions[0];
     const { op, target } = sk && r ? autoOperation(mesh, onPlane(sk, r.inside), sk.frame.n, 1) : { op: "new" as BooleanOp, target: undefined };
@@ -594,7 +608,7 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
         anchor,
         content: (
           <div className="ov-menu">
-            <strong className="ov-title">↻ Revolve</strong>
+            <strong className="ov-title">↻ Revolve{axisPick.edit ? " · new axis" : ""}</strong>
             <span className="ov-hint">
               pick the axis: {lines ? "a line of the sketch or " : ""}a world axis{lines ? "" : " · add a construction line to the sketch for your own axis"}
             </span>
@@ -757,7 +771,7 @@ export function useManipulation({ doc, mesh, scope, enabled, commit, onSketchOnF
     setActiveId(id);
   }, []);
 
-  return { selection: live, pickFace, pickEdge, pickBody, pickRegion, clear, activate, startRevolve, axisCandidates, pickAxis, pickingAxis: !!axisPick, handles, onHandleDrag, overlay, dragging, rigid, ghost, sweep, hiddenFaces, singlePlanarFace, activeId };
+  return { selection: live, pickFace, pickEdge, pickBody, pickRegion, clear, activate, startRevolve, repickAxis, axisCandidates, pickAxis, pickingAxis: !!axisPick, handles, onHandleDrag, overlay, dragging, rigid, ghost, sweep, hiddenFaces, singlePlanarFace, activeId };
 }
 
 const blendEdge = (d: Drag) => d.edge ?? "";

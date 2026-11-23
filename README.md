@@ -68,7 +68,7 @@ Funzioni non ancora coperte (ordine indicativo, le più utili prima):
 20. ~~Vista in sezione dal vivo~~: piano di taglio su X, Y o Z, lato invertibile, posizione col cursore, sezione piena colorata (tasto S)
 21. ~~Piani di costruzione~~: sfalsati da una faccia o da un piano standard, inclinati attorno a uno spigolo, di mezzeria fra due facce, normali a uno spigolo; sketch sul piano (manca: per tre punti)
 22. ~~Vincoli mancanti~~: concentrici (cerchi, archi, ellissi), simmetria rispetto a una linea (punti, linee, cerchi), distanza punto-linea e tra linee parallele, semiassi dell'ellisse; pattern lineari e circolari delle curve selezionate (copie)
-23. Strumenti di sketch: raccordo degli angoli, asola (slot), testo, immagini di riferimento, scelta dell'asse di revolve cliccando una linea nella vista
+23. ~~Strumenti di sketch~~: raccordo degli angoli (U) con quota del raggio, asola (B) con centri e larghezza, immagini di riferimento da ricalcare con scala da una distanza nota, cambio dell'asse di un revolve cliccando una linea nella vista (manca: testo, rimandato)
 24. Split di corpi e facce, Face Offset, Replace Face, Scale nel transform, Align e Symmetry
 25. Import ed export DXF degli sketch
 26. Rami alternativi della history (tool branching)

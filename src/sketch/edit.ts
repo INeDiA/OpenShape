@@ -2,7 +2,7 @@
 // offset curves by a distance. Pure functions returning a new sketch.
 
 import type { NewConstraint, SkArc, SkCircle, SkConstraint, SkCurve, SkEntity, SkLine, SketchData } from "./model";
-import { curveEnds, entityMap, pointOf, removeEntities, skId } from "./model";
+import { constraintRefs, curveEnds, curvePoints, entityMap, pointOf, removeEntities, skId } from "./model";
 import { curvePolyline, type Pt } from "./curves";
 
 const TWO_PI = Math.PI * 2;
@@ -464,5 +464,108 @@ export function circularPlace(cx: number, cy: number, count: number, angle = 360
   return (x: number, y: number, k: number): Pt => {
     const c = Math.cos(step * k), s = Math.sin(step * k);
     return [cx + (x - cx) * c - (y - cy) * s, cy + (x - cx) * s + (y - cy) * c];
+  };
+}
+
+// ---- corner fillet ----------------------------------------------------------
+
+/** Direction a line (p1 → p2) or arc (counter-clockwise) runs at one of its points. */
+function runDir(m: Map<string, SkEntity>, c: SkLine | SkArc, at: { x: number; y: number }): Pt {
+  if (c.kind === "line") {
+    const a = pointOf(m, c.p1), b = pointOf(m, c.p2);
+    return [b.x - a.x, b.y - a.y];
+  }
+  const ctr = pointOf(m, c.center);
+  return [-(at.y - ctr.y), at.x - ctr.x];
+}
+
+/** The tangency constraint between a line or arc and an arc meeting at `point`. */
+function tangentAtPoint(m: Map<string, SkEntity>, a: SkLine | SkArc, b: SkArc, point: string): NewConstraint {
+  const p = pointOf(m, point);
+  const da = runDir(m, a, p), db = runDir(m, b, p);
+  return { kind: "tangentAt", a: a.id, b: b.id, point, reversed: da[0] * db[0] + da[1] * db[1] < 0 };
+}
+
+export type FilletResult = { sketch: SketchData; ids: string[]; dropped: number } | { error: string };
+
+/**
+ * Rounds the corner where two lines meet at `pointId` with an arc of radius
+ * `r` tangent to both. The lines are shortened to where the arc starts; the
+ * arc gets a radius dimension. Constraints on the corner point (and lengths
+ * of the two lines, which no longer reach the corner) are dropped.
+ */
+export function filletCorner(s: SketchData, pointId: string, r: number): FilletResult {
+  const m = entityMap(s);
+  const at = (l: SkLine) => l.p1 === pointId || l.p2 === pointId;
+  const lines = s.entities.filter((e): e is SkLine => e.kind === "line" && !e.construction && at(e));
+  const others = s.entities.filter((e) => e.kind !== "point" && e.kind !== "line" && !e.construction && curvePoints(e).includes(pointId));
+  if (lines.length !== 2 || others.length) return { error: "Fillet: click a corner where exactly two lines meet." };
+  if (!(r > 0)) return { error: "The fillet radius must be positive." };
+  const P = pointOf(m, pointId);
+  const far = lines.map((l) => pointOf(m, l.p1 === pointId ? l.p2 : l.p1));
+  const len = far.map((q) => Math.hypot(q.x - P.x, q.y - P.y));
+  if (Math.min(...len) < EPS) return { error: "One of the lines has no length." };
+  const u = far.map((q, i) => [(q.x - P.x) / len[i], (q.y - P.y) / len[i]] as Pt);
+  const theta = Math.acos(Math.max(-1, Math.min(1, u[0][0] * u[1][0] + u[0][1] * u[1][1])));
+  if (theta < 1e-3 || Math.PI - theta < 1e-3) return { error: "The lines are in line: there is no corner to round." };
+  const t = r / Math.tan(theta / 2);
+  if (t >= Math.min(...len) - 1e-9) {
+    const max = Math.min(...len) * Math.tan(theta / 2);
+    return { error: `Radius too big for these lines (at most ${Math.floor(max * 100) / 100}).` };
+  }
+  const T = u.map(([ux, uy]) => ({ id: skId("p"), kind: "point" as const, x: P.x + ux * t, y: P.y + uy * t }));
+  const bl = Math.hypot(u[0][0] + u[1][0], u[0][1] + u[1][1]);
+  const k = r / Math.sin(theta / 2) / bl;
+  const C = { id: skId("p"), kind: "point" as const, x: P.x + (u[0][0] + u[1][0]) * k, y: P.y + (u[0][1] + u[1][1]) * k };
+  const ccw = (T[0].x - C.x) * (T[1].y - C.y) - (T[0].y - C.y) * (T[1].x - C.x) > 0;
+  const arc: SkArc = { id: skId("a"), kind: "arc", center: C.id, start: ccw ? T[0].id : T[1].id, end: ccw ? T[1].id : T[0].id, radius: r };
+  const moved = new Map(lines.map((l, i) => [l.id, { ...l, p1: l.p1 === pointId ? T[i].id : l.p1, p2: l.p2 === pointId ? T[i].id : l.p2 }]));
+  // The corner point goes unless something else (a construction line) still uses it.
+  const keep = s.entities.some((e) => e.kind !== "point" && !moved.has(e.id) && curvePoints(e).includes(pointId));
+  const entities: SkEntity[] = [...s.entities.filter((e) => keep || e.id !== pointId).map((e) => moved.get(e.id) ?? e), ...T, C, arc];
+  const m2 = new Map(entities.map((e) => [e.id, e]));
+  const kept = s.constraints.filter((c) => {
+    if (c.kind === "length" && moved.has(c.line)) return false;
+    return keep || !constraintRefs(c).includes(pointId);
+  });
+  const added = [
+    ...lines.map((_, i) => tangentAtPoint(m2, moved.get(lines[i].id)!, arc, T[i].id)),
+    { kind: "radius", circle: arc.id, value: r } as NewConstraint,
+  ].map((c) => ({ ...c, id: skId("c") }) as SkConstraint);
+  return { sketch: { entities, constraints: [...kept, ...added] }, ids: [arc.id], dropped: s.constraints.length - kept.length };
+}
+
+// ---- slot -------------------------------------------------------------------
+
+/**
+ * Straight slot around the segment from `a` to `b` (its two arc centres),
+ * `r` wide on each side: two half circles joined by two lines, tangent where
+ * they meet, with equal radii. A construction line joins the centres.
+ */
+export function addSlot(s: SketchData, a: Pt, b: Pt, r: number): { sketch: SketchData; ids: string[] } | null {
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  if (len < EPS || !(r > EPS)) return null;
+  const nx = -(b[1] - a[1]) / len, ny = (b[0] - a[0]) / len; // left of a → b
+  const pt = (x: number, y: number) => ({ id: skId("p"), kind: "point" as const, x, y });
+  const A = pt(a[0], a[1]), B = pt(b[0], b[1]);
+  const aL = pt(a[0] + nx * r, a[1] + ny * r), aR = pt(a[0] - nx * r, a[1] - ny * r);
+  const bL = pt(b[0] + nx * r, b[1] + ny * r), bR = pt(b[0] - nx * r, b[1] - ny * r);
+  const right: SkLine = { id: skId("l"), kind: "line", p1: aR.id, p2: bR.id };
+  const left: SkLine = { id: skId("l"), kind: "line", p1: bL.id, p2: aL.id };
+  const capB: SkArc = { id: skId("a"), kind: "arc", center: B.id, start: bR.id, end: bL.id, radius: r };
+  const capA: SkArc = { id: skId("a"), kind: "arc", center: A.id, start: aL.id, end: aR.id, radius: r };
+  const axis: SkLine = { id: skId("l"), kind: "line", p1: A.id, p2: B.id, construction: true };
+  const entities: SkEntity[] = [...s.entities, A, B, aL, aR, bL, bR, right, left, capB, capA, axis];
+  const m = new Map(entities.map((e) => [e.id, e]));
+  const cs: NewConstraint[] = [
+    tangentAtPoint(m, right, capB, bR.id),
+    tangentAtPoint(m, left, capB, bL.id),
+    tangentAtPoint(m, left, capA, aL.id),
+    tangentAtPoint(m, right, capA, aR.id),
+    { kind: "equal", a: capA.id, b: capB.id },
+  ];
+  return {
+    sketch: { entities, constraints: [...s.constraints, ...cs.map((c) => ({ ...c, id: skId("c") }) as SkConstraint)] },
+    ids: [right.id, capB.id, left.id, capA.id],
   };
 }

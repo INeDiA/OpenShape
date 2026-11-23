@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent, type ReactElement, type WheelEvent as RWheelEvent } from "react";
-import type { SketchFeature } from "../model/types";
+import type { SketchFeature, SketchImage } from "../model/types";
 import { constraintActions, CONSTRAINT_GLYPH, dimensionFor } from "./actions";
 import { addArcThrough, addCircle, addConstraint, addEllipse, addLineBetween, addPoint, addRectangle, addSpline, addTangentArc, exitDirection, tangentArcGeom } from "./builders";
 import { ellipseGeom, splineBeziers, splinePoints, type Pt } from "./curves";
-import { circularPlace, linearPlace, offsetCurves, patternCurves, trimCurve } from "./edit";
+import { addSlot, circularPlace, filletCorner, linearPlace, offsetCurves, patternCurves, trimCurve } from "./edit";
 import { addProjected, distanceTo, type Projected } from "./project";
 import { arcMidpoint } from "./profiles";
 import { bounds, hitTest, type Hit } from "./geometry";
@@ -13,7 +13,7 @@ import { curvePoints, entityMap, isDimension, pointOf, removeConstraints, remove
 import { solve, type DragTarget, type SolveResult } from "./solver";
 import { evalExpr, isPlainNumber, type Scope } from "../expr/expr";
 
-type Tool = "select" | "line" | "rect" | "circle" | "arc" | "tarc" | "ellipse" | "spline" | "trim" | "project";
+type Tool = "select" | "line" | "rect" | "circle" | "arc" | "tarc" | "ellipse" | "spline" | "slot" | "fillet" | "trim" | "project";
 
 interface Props {
   feature: SketchFeature;
@@ -23,6 +23,8 @@ interface Props {
   /** The model's edges seen through the sketch plane, for the Project tool. */
   projectable?: Projected[];
   onCommit: (sketch: SketchData) => void;
+  /** Saves the reference pictures (added, moved, scaled or removed). */
+  onImages?: (images: SketchImage[]) => void;
   onExit: () => void;
   /** Reports the 2D view (center in sketch coordinates, pixels per mm) so the 3D camera can follow it. */
   onViewChange?: (view: { cx: number; cy: number; scale: number }) => void;
@@ -45,6 +47,8 @@ type Pending =
   | { tool: "tarc"; curve: string; from: string }
   | { tool: "ellipse"; cx: number; cy: number; center: string | null; major?: { x: number; y: number } }
   | { tool: "spline"; points: { id: string | null; x: number; y: number }[] }
+  /** Slot: the first arc centre, then the second; the third click sets the width. */
+  | { tool: "slot"; a: { id: string | null; x: number; y: number }; b?: { id: string | null; x: number; y: number } }
   | null;
 
 interface DragState {
@@ -64,7 +68,7 @@ interface EditState {
 
 const SNAP_PX = 9;
 const AXIS_SNAP_DEG = 4;
-const TOOL_KEYS: Record<string, Tool> = { s: "select", l: "line", r: "rect", c: "circle", a: "arc", g: "tarc", o: "ellipse", p: "spline", k: "trim", j: "project" };
+const TOOL_KEYS: Record<string, Tool> = { s: "select", l: "line", r: "rect", c: "circle", a: "arc", g: "tarc", o: "ellipse", p: "spline", b: "slot", u: "fillet", k: "trim", j: "project" };
 
 /** The line or arc ending at point `id` that a tangent arc should continue (the newest one). */
 function curveEndingAt(s: SketchData, id: string): string | null {
@@ -77,7 +81,7 @@ function curveEndingAt(s: SketchData, id: string): string | null {
 
 const fmt = (v: number) => (Math.abs(v - Math.round(v)) < 1e-6 ? String(Math.round(v)) : v.toFixed(2));
 
-export function SketchEditor({ feature, scope, reference, projectable = [], onCommit, onExit, onViewChange }: Props) {
+export function SketchEditor({ feature, scope, reference, projectable = [], onCommit, onImages, onExit, onViewChange }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
   const [sketch, setSketch] = useState<SketchData>(feature.sketch);
@@ -92,8 +96,17 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
   /** Offset distance being typed (null when the offset field is closed). */
   const [offsetText, setOffsetText] = useState<string | null>(null);
   /** Pattern being set up for the selected curves (null when its fields are closed). */
+  /** Radius for the Fillet tool. */
+  const [filletText, setFilletText] = useState("2");
   const [patternForm, setPatternForm] = useState<{ mode: "linear" | "circular"; count: string; dx: string; dy: string; angle: string } | null>(null);
   const drag = useRef<DragState | null>(null);
+  /** Reference pictures, the selected one, and one being dragged. */
+  const [images, setImages] = useState<SketchImage[]>(feature.images ?? []);
+  const [imageSel, setImageSel] = useState<string | null>(null);
+  const imgDrag = useRef<{ id: string; x0: number; y0: number; sx: number; sy: number; moved: boolean } | null>(null);
+  /** Scale calibration: two points picked on the picture, then their real distance. */
+  const [calib, setCalib] = useState<{ id: string; pts: { x: number; y: number }[]; text: string } | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const pan = useRef<{ x: number; y: number; cx: number; cy: number } | null>(null);
 
   const [view, setView] = useState<View>(() => {
@@ -106,6 +119,71 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
   useEffect(() => {
     if (!drag.current) setSketch(feature.sketch);
   }, [feature.sketch]);
+
+  useEffect(() => {
+    if (!imgDrag.current) setImages(feature.images ?? []);
+  }, [feature.images]);
+
+  const commitImages = (list: SketchImage[]) => {
+    setImages(list);
+    onImages?.(list);
+  };
+
+  /** Reads a picture, shrinks it to at most 1600 px and places it in the middle of the view. */
+  const importImage = async (file: File) => {
+    try {
+      const url = await new Promise<string>((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result as string);
+        r.onerror = () => rej(r.error);
+        r.readAsDataURL(file);
+      });
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      const k = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
+      const cv = document.createElement("canvas");
+      cv.width = Math.max(1, Math.round(img.naturalWidth * k));
+      cv.height = Math.max(1, Math.round(img.naturalHeight * k));
+      cv.getContext("2d")!.drawImage(img, 0, 0, cv.width, cv.height);
+      // PNG keeps transparency; when it comes out big, JPEG it is.
+      let src = file.type === "image/png" ? cv.toDataURL("image/png") : "";
+      if (!src || src.length > 1_500_000) src = cv.toDataURL("image/jpeg", 0.85);
+      const width = (size.w / view.scale) * 0.6;
+      const im: SketchImage = { id: skId("img"), src, x: view.cx, y: view.cy, width, height: (width * cv.height) / cv.width, opacity: 0.6 };
+      commitImages([...images, im]);
+      setImageSel(im.id);
+      setSelection(new Set());
+      setMessage("Picture added: drag it into place, then use Scale to set its real size.");
+    } catch {
+      setMessage("Couldn't read that picture.");
+    }
+  };
+
+  /** Scales the picture being calibrated so the two picked points are `text` mm apart. */
+  const applyCalibration = () => {
+    if (!calib || calib.pts.length < 2) return;
+    let real: number;
+    try {
+      real = evalExpr(calib.text.trim().replace(",", "."), scope);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    const [p, q] = calib.pts;
+    const d = Math.hypot(q.x - p.x, q.y - p.y);
+    if (!(real > 0) || d < 1e-9) {
+      setMessage("The distance must be positive.");
+      return;
+    }
+    const k = real / d;
+    commitImages(images.map((im) => (im.id === calib.id ? { ...im, width: im.width * k, height: im.height * k, x: p.x + (im.x - p.x) * k, y: p.y + (im.y - p.y) * k } : im)));
+    setCalib(null);
+    setMessage(null);
+  };
+
+  const imageAt = (x: number, y: number) =>
+    [...images].reverse().find((im) => Math.abs(x - im.x) <= im.width / 2 && Math.abs(y - im.y) <= im.height / 2) ?? null;
 
   // Initial status.
   useEffect(() => {
@@ -253,12 +331,25 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
     }
     if (ev.button !== 0) return;
 
+    if (calib) {
+      if (calib.pts.length < 2) {
+        const snap = snapPoint(x, y);
+        const at = snap ? pointOf(sketch, snap) : { x, y };
+        setCalib({ ...calib, pts: [...calib.pts, { x: at.x, y: at.y }] });
+      }
+      return;
+    }
+
     if (tool === "select") {
       const h = hitTest(sketch, x, y, SNAP_PX / view.scale);
       if (!h) {
         setSelection(new Set());
+        const im = imageAt(x, y);
+        setImageSel(im?.id ?? null);
+        if (im) imgDrag.current = { id: im.id, x0: im.x, y0: im.y, sx: x, sy: y, moved: false };
         return;
       }
+      setImageSel(null);
       setSelection((sel) => {
         const n = new Set(ev.shiftKey || ev.metaKey ? sel : sel.has(h.id) ? sel : []);
         if (n.has(h.id) && (ev.shiftKey || ev.metaKey)) n.delete(h.id);
@@ -341,6 +432,53 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
       const r = addArcThrough(sketch, pending.start ?? { x: pending.sx, y: pending.sy }, pending.end.id ?? { x: pending.end.x, y: pending.end.y }, { x, y });
       if (r) apply(r.sketch, "arc");
       else setMessage("The three points are in line: move the cursor off the chord.");
+      setPending(null);
+      return;
+    }
+
+    if (tool === "fillet") {
+      const corner = snapPoint(x, y);
+      if (!corner) {
+        setMessage("Fillet: click the corner point where two lines meet.");
+        return;
+      }
+      let r: number;
+      try {
+        r = evalExpr(filletText.trim().replace(",", "."), scope);
+      } catch (e) {
+        setMessage(e instanceof Error ? e.message : String(e));
+        return;
+      }
+      const res = filletCorner(sketch, corner, r);
+      if ("error" in res) setMessage(res.error);
+      else if (apply(res.sketch, "fillet") && res.dropped) setMessage(`Rounded. ${res.dropped} constraint${res.dropped > 1 ? "s" : ""} on the old corner removed.`);
+      setHover(null);
+      return;
+    }
+
+    if (tool === "slot") {
+      const snap = snapPoint(x, y);
+      const at = snap ? pointOf(sketch, snap) : refSnap(x, y) ?? { x: gridSnap(x), y: gridSnap(y) };
+      if (!pending || pending.tool !== "slot") {
+        setPending({ tool: "slot", a: { id: snap, x: at.x, y: at.y } });
+        return;
+      }
+      if (!pending.b) {
+        if (Math.hypot(at.x - pending.a.x, at.y - pending.a.y) < 1e-6) return;
+        setPending({ ...pending, b: { id: snap, x: at.x, y: at.y } });
+        return;
+      }
+      const r = slotWidth(pending.a, pending.b, x, y);
+      const res = addSlot(sketch, [pending.a.x, pending.a.y], [pending.b.x, pending.b.y], r);
+      if (res) {
+        // Centres snapped onto existing points stay joined to them.
+        let next = res.sketch;
+        const caps = res.ids.map((id) => next.entities.find((e) => e.id === id)).filter((e): e is SkArc => e?.kind === "arc");
+        const [capB, capA] = caps;
+        if (pending.a.id) next = addConstraint(next, { kind: "coincident", a: capA.center, b: pending.a.id }).sketch;
+        if (pending.b.id) next = addConstraint(next, { kind: "coincident", a: capB.center, b: pending.b.id }).sketch;
+        apply(next, "slot");
+      }
       setPending(null);
       return;
     }
@@ -467,6 +605,13 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
       setView((v) => ({ ...v, cx: p.cx - (ev.clientX - p.x) / v.scale, cy: p.cy + (ev.clientY - p.y) / v.scale }));
       return;
     }
+    const g = imgDrag.current;
+    if (g) {
+      if (!g.moved && Math.hypot(w.x - g.sx, w.y - g.sy) * view.scale < 3) return;
+      g.moved = true;
+      setImages((list) => list.map((im) => (im.id === g.id ? { ...im, x: g.x0 + w.x - g.sx, y: g.y0 + w.y - g.sy } : im)));
+      return;
+    }
     const d = drag.current;
     if (d) {
       const dx = w.x - d.startX, dy = w.y - d.startY;
@@ -482,6 +627,9 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
 
   const onPointerUp = () => {
     pan.current = null;
+    const g = imgDrag.current;
+    imgDrag.current = null;
+    if (g?.moved) onImages?.(images);
     const d = drag.current;
     drag.current = null;
     if (d?.moved) {
@@ -633,8 +781,19 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
         finishSpline(pending.points, false);
         return;
       }
+      if (k === "escape" && calib) {
+        setCalib(null);
+        return;
+      }
+      if ((k === "delete" || k === "backspace") && imageSel && !selection.size) {
+        e.preventDefault();
+        commitImages(images.filter((im) => im.id !== imageSel));
+        setImageSel(null);
+        return;
+      }
       if (k === "escape") {
         if (pending) cancelPending();
+        else if (imageSel) setImageSel(null);
         else if (selection.size) setSelection(new Set());
         else if (tool !== "select") setTool("select");
         else onExit();
@@ -1021,6 +1180,41 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
           })}
         </g>
       );
+    } else if (pending.tool === "slot") {
+      const [ax, ay] = toScreen(pending.a.x, pending.a.y);
+      if (!pending.b) {
+        const snap = snapPoint(cursor.x, cursor.y);
+        const b = snap ? pointOf(m, snap) : { x: gridSnap(cursor.x), y: gridSnap(cursor.y) };
+        const [bx, by] = toScreen(b.x, b.y);
+        preview = (
+          <g>
+            <line x1={ax} y1={ay} x2={bx} y2={by} className="preview" />
+            <text x={bx + 10} y={by - 10} className="preview-label">
+              {fmt(Math.hypot(b.x - pending.a.x, b.y - pending.a.y))}
+            </text>
+          </g>
+        );
+      } else {
+        const r = slotWidth(pending.a, pending.b, cursor.x, cursor.y);
+        const { a, b } = pending;
+        const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+        const nx = (-(b.y - a.y) / len) * r, ny = ((b.x - a.x) / len) * r;
+        const P = (x: number, y: number) => toScreen(x, y).join(" ");
+        const R = r * view.scale;
+        const [qx, qy] = toScreen(cursor.x, cursor.y);
+        preview =
+          r > 1e-6 ? (
+            <g>
+              <path
+                d={`M ${P(a.x - nx, a.y - ny)} L ${P(b.x - nx, b.y - ny)} A ${R} ${R} 0 0 0 ${P(b.x + nx, b.y + ny)} L ${P(a.x + nx, a.y + ny)} A ${R} ${R} 0 0 0 ${P(a.x - nx, a.y - ny)} Z`}
+                className="preview"
+              />
+              <text x={qx + 10} y={qy - 10} className="preview-label">
+                {fmt(len)} × {fmt(2 * r)}
+              </text>
+            </g>
+          ) : null;
+      }
     } else if (pending.tool === "circle") {
       const [cx, cy] = toScreen(pending.x, pending.y);
       const r = Math.hypot(cursor.x - pending.x, cursor.y - pending.y);
@@ -1064,6 +1258,8 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
               ["tarc", "◡ Tangent arc", "G"],
               ["ellipse", "⬭ Ellipse", "O"],
               ["spline", "∿ Spline", "P"],
+              ["slot", "⊂⊃ Slot", "B"],
+              ["fillet", "◜ Fillet", "U"],
               ["trim", "✂ Trim", "K"],
               ["project", "⤓ Project", "J"],
             ] as const
@@ -1073,6 +1269,76 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
             </button>
           ))}
         </div>
+        <div className="group">
+          <button title="Add a picture to trace over (it stays under the sketch and never becomes geometry)" onClick={() => fileInput.current?.click()}>
+            🖼 Image
+          </button>
+          <input
+            ref={fileInput}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            hidden
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = "";
+              if (f) void importImage(f);
+            }}
+          />
+          {imageSel && !calib && (
+            <>
+              <label className="offset-field" title="Opacity of the picture">
+                Opacity
+                <input
+                  type="range"
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  value={images.find((im) => im.id === imageSel)?.opacity ?? 0.6}
+                  onChange={(e) => setImages(images.map((im) => (im.id === imageSel ? { ...im, opacity: Number(e.target.value) } : im)))}
+                  onPointerUp={() => onImages?.(images)}
+                  onKeyUp={() => onImages?.(images)}
+                  aria-label="Image opacity"
+                />
+              </label>
+              <button title="Set the real size: click two points on the picture, then type how far apart they are" onClick={() => setCalib({ id: imageSel, pts: [], text: "" })}>
+                📏 Scale
+              </button>
+              <button
+                title="Remove the picture (⌫)"
+                onClick={() => {
+                  commitImages(images.filter((im) => im.id !== imageSel));
+                  setImageSel(null);
+                }}
+              >
+                ✕ Image
+              </button>
+            </>
+          )}
+          {calib && calib.pts.length < 2 && <span className="muted">Click {calib.pts.length ? "the second" : "the first"} of two points a known distance apart (Esc cancels)</span>}
+          {calib && calib.pts.length === 2 && (
+            <label className="offset-field" title="Real distance between the two points (mm)">
+              Distance
+              <input
+                autoFocus
+                value={calib.text}
+                placeholder="mm"
+                onChange={(e) => setCalib({ ...calib, text: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") applyCalibration();
+                  if (e.key === "Escape") setCalib(null);
+                }}
+                aria-label="Real distance"
+              />
+              <button onClick={applyCalibration}>✓</button>
+            </label>
+          )}
+        </div>
+        {tool === "fillet" && (
+          <label className="offset-field" title="Radius of the rounded corner (mm). Click a corner where two lines meet">
+            Radius
+            <input value={filletText} onChange={(e) => setFilletText(e.target.value)} onFocus={(e) => e.target.select()} aria-label="Fillet radius" />
+          </label>
+        )}
         {tool === "project" && (
           <div className="group">
             <button
@@ -1183,6 +1449,29 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
         }}
       >
         {grid}
+        {images.map((im) => {
+          const [x0, y0] = toScreen(im.x - im.width / 2, im.y + im.height / 2);
+          const w = im.width * view.scale, h = im.height * view.scale;
+          return (
+            <g key={im.id}>
+              <image href={im.src} x={x0} y={y0} width={w} height={h} opacity={im.opacity} preserveAspectRatio="none" />
+              {imageSel === im.id && <rect x={x0} y={y0} width={w} height={h} className="image-sel" />}
+            </g>
+          );
+        })}
+        {calib &&
+          (() => {
+            const pts = calib.pts.length < 2 && cursor ? [...calib.pts, cursor] : calib.pts;
+            const sc = pts.map((p) => toScreen(p.x, p.y));
+            return (
+              <g>
+                {sc.length === 2 && <line x1={sc[0][0]} y1={sc[0][1]} x2={sc[1][0]} y2={sc[1][1]} className="calib-line" />}
+                {sc.map(([px, py], i) => (
+                  <circle key={i} cx={px} cy={py} r={4} className="calib-pt" />
+                ))}
+              </g>
+            );
+          })()}
         {reference &&
           Array.from({ length: reference.length / 4 }, (_, i) => {
             const [ax, ay] = toScreen(reference[i * 4], reference[i * 4 + 1]);
@@ -1264,6 +1553,12 @@ function Glyph({ id, x, y, text, cls, onSelect }: { id: string; x: number; y: nu
       </text>
     </g>
   );
+}
+
+/** Slot half width from the cursor: its distance to the line through the two centres. */
+function slotWidth(a: { x: number; y: number }, b: { x: number; y: number }, x: number, y: number): number {
+  const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+  return Math.abs((x - a.x) * (b.y - a.y) - (y - a.y) * (b.x - a.x)) / len;
 }
 
 /** Minor radius from the cursor: its distance to the major axis line. */

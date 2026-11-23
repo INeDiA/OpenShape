@@ -930,6 +930,7 @@ export function App() {
             reference={sketchPreviews.find((p) => p.id === editingSketch.id)?.reference}
             projectable={projectable}
             onCommit={(sketch) => update((cur) => updateFeature(cur, editingSketch.id, { sketch }))}
+            onImages={(images) => update((cur) => updateFeature(cur, editingSketch.id, { images: images.length ? images : undefined }))}
             onExit={() => {
               setEditingSketchId(null);
               setSketchView(null);
@@ -996,6 +997,8 @@ export function App() {
         }}
         onPickNeutral={() => setRepickNeutral(true)}
         pickingNeutral={pickNeutral}
+        onPickAxis={selected?.type === "revolve" ? () => manip.repickAxis(selected) : undefined}
+        pickingAxis={manip.pickingAxis}
       />
       </>
       )}
