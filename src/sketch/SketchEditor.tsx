@@ -11,6 +11,8 @@ import { skId } from "./model";
 import type { NewConstraint, SkArc, SkCircle, SkConstraint, SkCurve, SkEllipse, SkLine, SketchData } from "./model";
 import { curvePoints, entityMap, isDimension, pointOf, removeConstraints, removeEntities } from "./model";
 import { solve, type DragTarget, type SolveResult } from "./solver";
+import { DXFError, dxfToSketch, sketchToDXF, withImported } from "./dxf";
+import { downloadBlob } from "../io/storage";
 import { evalExpr, isPlainNumber, type Scope } from "../expr/expr";
 
 type Tool = "select" | "line" | "rect" | "circle" | "arc" | "tarc" | "ellipse" | "spline" | "slot" | "fillet" | "trim" | "project";
@@ -107,6 +109,9 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
   /** Scale calibration: two points picked on the picture, then their real distance. */
   const [calib, setCalib] = useState<{ id: string; pts: { x: number; y: number }[]; text: string } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const dxfInput = useRef<HTMLInputElement>(null);
+  /** Information (not an error) shown in the status bar, e.g. what a DXF import brought in. */
+  const [notice, setNotice] = useState<string | null>(null);
   const pan = useRef<{ x: number; y: number; cx: number; cy: number } | null>(null);
 
   const [view, setView] = useState<View>(() => {
@@ -127,6 +132,31 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
   const commitImages = (list: SketchImage[]) => {
     setImages(list);
     onImages?.(list);
+  };
+
+  /** Adds the curves of a DXF file to the sketch, at their own coordinates, and shows them. */
+  const importDXF = async (file: File) => {
+    try {
+      const r = dxfToSketch(await file.text());
+      const next = withImported(sketch, r);
+      if (!apply(next, "the import")) return;
+      const b = bounds(next);
+      if (b) {
+        const w = Math.max(b.maxX - b.minX, 10), h = Math.max(b.maxY - b.minY, 10);
+        setView({ cx: (b.minX + b.maxX) / 2, cy: (b.minY + b.maxY) / 2, scale: Math.min(size.w / w, size.h / h) * 0.55 });
+      }
+      const skipped = Object.entries(r.skipped).map(([t, n]) => `${n} ${t}`);
+      const units = r.unitScale === 25.4 ? " (inches converted to mm)" : r.unitScale !== 1 ? ` (scaled ×${r.unitScale} to mm)` : "";
+      setNotice(`Imported ${r.curves} curve${r.curves === 1 ? "" : "s"} from ${file.name}${units}${skipped.length ? `; skipped ${skipped.join(", ")}` : ""}`);
+    } catch (e) {
+      setNotice(null);
+      setMessage(e instanceof DXFError ? e.message : `Can't read ${file.name}: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const exportDXF = () => {
+    downloadBlob(new Blob([sketchToDXF(sketch)], { type: "application/dxf" }), `${feature.name.replace(/[\\/:*?"<>|]/g, "_")}.dxf`);
+    setNotice(`Exported ${feature.name}.dxf (mm, R12)`);
   };
 
   /** Reads a picture, shrinks it to at most 1600 px and places it in the middle of the view. */
@@ -1273,6 +1303,27 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
           <button title="Add a picture to trace over (it stays under the sketch and never becomes geometry)" onClick={() => fileInput.current?.click()}>
             🖼 Image
           </button>
+          <button title="Add the curves of a DXF file (lines, arcs, circles, polylines, ellipses, splines), at their coordinates" onClick={() => dxfInput.current?.click()}>
+            ⤓ DXF
+          </button>
+          <input
+            ref={dxfInput}
+            type="file"
+            accept=".dxf"
+            hidden
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = "";
+              if (f) void importDXF(f);
+            }}
+          />
+          <button
+            title="Save the sketch as DXF (R12, mm): for laser cutters, CNC and other CAD programs"
+            disabled={!sketch.entities.some((x) => x.kind !== "point")}
+            onClick={exportDXF}
+          >
+            ⤒ DXF
+          </button>
           <input
             ref={fileInput}
             type="file"
@@ -1527,6 +1578,7 @@ export function SketchEditor({ feature, scope, reference, projectable = [], onCo
         <span className={status?.dof === 0 && sketch.entities.length ? "ok" : ""}>{dofText}</span>
         {conflicting.size > 0 && <span className="error-msg">{conflicting.size} conflicting</span>}
         {message && <span className="error-msg">{message}</span>}
+        {notice && !message && <span className="muted">{notice}</span>}
         {cursor && (
           <span className="muted right">
             x {fmt(Math.round(cursor.x * 10) / 10)} · y {fmt(Math.round(cursor.y * 10) / 10)}

@@ -72,7 +72,7 @@ Funzioni non ancora coperte (ordine indicativo, le più utili prima):
 22. ~~Vincoli mancanti~~: concentrici (cerchi, archi, ellissi), simmetria rispetto a una linea (punti, linee, cerchi), distanza punto-linea e tra linee parallele, semiassi dell'ellisse; pattern lineari e circolari delle curve selezionate (copie)
 23. ~~Strumenti di sketch~~: raccordo degli angoli (U) con quota del raggio, asola (B) con centri e larghezza, immagini di riferimento da ricalcare con scala da una distanza nota, cambio dell'asse di un revolve cliccando una linea nella vista (manca: testo, rimandato)
 24. ~~Modifica avanzata~~: split di un corpo con un piano, una faccia piana o un altro corpo; split delle facce con le curve di uno sketch; Face Offset su facce anche curve (fori più stretti); Replace Face fino a una faccia o a un piano, anche inclinato; scala uniforme nel transform; Align dei bounding box rispetto a un corpo o all'origine; Symmetry (metà tenuta e specchiata). Manca: scala non uniforme (OCCT nel build WASM non espone GTransform)
-25. Import ed export DXF degli sketch
+25. ~~DXF degli sketch~~: import (linee, archi, cerchi, polilinee con bulge, ellissi, spline; unità da $INSUNITS; estremi coincidenti uniti, così i contorni sono profili chiusi) ed export R12 in mm (ellissi e spline come polilinee, costruzione su un layer a parte), dai pulsanti ⤓/⤒ DXF dell'editor di sketch
 26. Rami alternativi della history (tool branching)
 27. Input: SpaceMouse (3Dconnexion), penna su tablet, palette dei comandi
 28. Rendering e screenshot
