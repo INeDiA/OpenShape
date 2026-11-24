@@ -105,14 +105,16 @@ export interface GhostPreview {
   distance: number;
 }
 
-/** World matrix of a transform feature: rotate about the pivot, then translate. */
+/** World matrix of a transform feature: scale and rotate about the pivot, then translate. */
 export function transformMatrix(t: TransformFeature): THREE.Matrix4 {
   const axis = new THREE.Vector3(t.axis === "X" ? 1 : 0, t.axis === "Y" ? 1 : 0, t.axis === "Z" ? 1 : 0);
   const pivot = new THREE.Vector3(t.pivotX, t.pivotY, t.pivotZ);
+  const k = t.scale ?? 1;
   return new THREE.Matrix4()
     .makeTranslation(t.dx, t.dy, t.dz)
     .multiply(new THREE.Matrix4().makeTranslation(pivot.x, pivot.y, pivot.z))
     .multiply(new THREE.Matrix4().makeRotationAxis(axis, (t.angle * Math.PI) / 180))
+    .multiply(new THREE.Matrix4().makeScale(k, k, k))
     .multiply(new THREE.Matrix4().makeTranslation(-pivot.x, -pivot.y, -pivot.z));
 }
 
@@ -950,6 +952,21 @@ function ActiveEditor({ feature: f, scope, doc, commit, onDone }: { feature: Fea
           {field("dy", "Y")}
           {field("dz", "Z")}
           {field("angle", "Rotate °")}
+          <label className="ov-field">
+            <span>Scale ×</span>
+            <ExprInput
+              value={f.scale ?? 1}
+              expr={f.exprs?.scale}
+              scope={scope}
+              min={0.001}
+              onCommit={({ value: v, expr }) => {
+                const exprs = { ...f.exprs };
+                if (expr) exprs.scale = expr;
+                else delete exprs.scale;
+                set({ scale: v, exprs } as Partial<Feature>);
+              }}
+            />
+          </label>
         </>
       )}
       <button className="primary" onClick={onDone} title="Done (Esc)">

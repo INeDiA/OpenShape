@@ -44,6 +44,12 @@ const PATHS = {
   insert: "M8 3h8v4H8zM9 7v14h6V7M9 10.5h6M9 14h6M9 17.5h6M5 21h14",
   thinwall: "M4 4v16M20 4v16M10 4v16M14 4v16M10 12h4M7 12H4M17 12h3",
   search: `${circle(10.5, 10.5, 6.5)}M15.5 15.5 21 21`,
+  split: "M3 6h7v12H3zM14 6h7v12h-7z",
+  splitface: "M4 4h16v16H4zM4 15l16-6",
+  faceoffset: "M3 20l4-4h13l-4 4zM6 10l4-4h11l-4 4zM12 16v-6",
+  replaceface: "M4 12h9v8H4zM19 3v18M8 12V8h11",
+  align: "M4 3v18M8 6h12v4H8zM8 14h7v4H8z",
+  symmetry: "M12 3v18M4 7c3 0 5 2 5 5s-2 5-5 5M20 7c-3 0-5 2-5 5s2 5 5 5",
 } as const;
 
 export type IconName = keyof typeof PATHS;
@@ -85,6 +91,12 @@ export const FEATURE_ICON = {
   mirror: "mirror",
   pattern: "pattern",
   transform: "move",
+  split: "split",
+  splitface: "splitface",
+  faceoffset: "faceoffset",
+  replaceface: "replaceface",
+  align: "align",
+  symmetry: "symmetry",
   layflat: "layflat",
   teardrop: "teardrop",
   holefit: "holefit",

@@ -1,4 +1,4 @@
-import type { BooleanOp, Feature, FeatureStatus, PlaneName, SketchFeature } from "../model/types";
+import type { AlignMode, BooleanOp, Feature, FeatureStatus, PlaneName, PlaneRef, SketchFeature } from "../model/types";
 import type { Scope } from "../expr/expr";
 import { isDimension, sketchLines } from "../sketch/model";
 import { ExprInput } from "./ExprInput";
@@ -52,6 +52,11 @@ interface Props {
   /** Revolve: pick its axis again by clicking a line in the view. */
   onPickAxis?: () => void;
   pickingAxis?: boolean;
+  /** Construction planes of the document (for features that reference a plane). */
+  planes?: { id: string; name: string }[];
+  /** Split, Symmetry, Replace face: pick the face their plane comes from in the viewport. */
+  onPickRef?: () => void;
+  pickingRef?: boolean;
 }
 
 function Check({ label, checked, onChange, title }: { label: string; checked: boolean; onChange: (v: boolean) => void; title?: string }) {
@@ -112,7 +117,7 @@ const PLANES: [PlaneName, string][] = [
   ["YZ", "YZ (right)"],
 ];
 
-export function PropertiesPanel({ feature: f, sketches, status, onChange, onEditSketch, canEditSketch, scope, bodies, onSketchOnPlane, onPickNeutral, pickingNeutral, onPickAxis, pickingAxis }: Props) {
+export function PropertiesPanel({ feature: f, sketches, status, onChange, onEditSketch, canEditSketch, scope, bodies, onSketchOnPlane, onPickNeutral, pickingNeutral, onPickAxis, pickingAxis, planes = [], onPickRef, pickingRef }: Props) {
   const sketchOptions = sketches.map((s) => [s.id, s.name] as [string, string]);
   if (!f) {
     return (
@@ -408,6 +413,110 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
         </>
       )}
 
+      {f.type === "transform" && (
+        <>
+          <Field label="Move X" feature={f} field="dx" scope={scope} onChange={onChange} />
+          <Field label="Move Y" feature={f} field="dy" scope={scope} onChange={onChange} />
+          <Field label="Move Z" feature={f} field="dz" scope={scope} onChange={onChange} />
+          <Select label="Rotate about" value={f.axis} options={[["X", "X"], ["Y", "Y"], ["Z", "Z"]]} onChange={(axis) => onChange({ axis })} />
+          <Field label="Angle °" feature={f} field="angle" scope={scope} onChange={onChange} />
+          <Field label="Scale ×" feature={{ ...f, scale: f.scale ?? 1 }} field="scale" scope={scope} min={0.001} onChange={onChange} />
+          <Field label="Pivot X" feature={f} field="pivotX" scope={scope} onChange={onChange} />
+          <Field label="Pivot Y" feature={f} field="pivotY" scope={scope} onChange={onChange} />
+          <Field label="Pivot Z" feature={f} field="pivotZ" scope={scope} onChange={onChange} />
+          <p className="muted">Scales uniformly about the pivot, then rotates about the axis through it, then moves.</p>
+        </>
+      )}
+
+      {f.type === "split" && (
+        <>
+          <Select label="Body" value={f.body ?? ""} options={[["", "Latest body"], ...bodies.map((b) => [b.id, b.name] as [string, string])]} onChange={(body) => onChange({ body: body || undefined })} />
+          <Select
+            label="Split with"
+            value={f.toolBody ?? ""}
+            options={[["", "A plane"], ...bodies.filter((b) => b.id !== f.body).map((b) => [b.id, `Body: ${b.name}`] as [string, string])]}
+            onChange={(toolBody) => onChange({ toolBody: toolBody || undefined })}
+          />
+          {!f.toolBody && <PlaneRefFields f={f} planes={planes} scope={scope} onChange={onChange} onPick={onPickRef} picking={pickingRef} />}
+          <p className="muted">
+            {f.toolBody
+              ? "The part inside the tool body becomes a new body; the tool stays."
+              : "The piece the plane's normal points to keeps the body's name; the other becomes a new body."}{" "}
+            Click a body in the view to split it.
+          </p>
+        </>
+      )}
+
+      {f.type === "symmetry" && (
+        <>
+          <Select label="Body" value={f.body ?? ""} options={[["", "Latest body"], ...bodies.map((b) => [b.id, b.name] as [string, string])]} onChange={(body) => onChange({ body: body || undefined })} />
+          <PlaneRefFields f={f} planes={planes} scope={scope} onChange={onChange} onPick={onPickRef} picking={pickingRef} />
+          <Check label="Keep the other side" checked={f.flip} onChange={(flip) => onChange({ flip })} />
+          <p className="muted">The half on the kept side of the plane is mirrored onto the other, replacing it. Click a body in the view to pick it.</p>
+        </>
+      )}
+
+      {f.type === "splitface" && (
+        <>
+          <Select label="Sketch" value={f.sketchId} options={sketchOptions} onChange={(sketchId) => onChange({ sketchId })} />
+          <p className="muted">The sketch's curves divide the faces they lie on, so each part can be pushed, pulled or offset on its own. Draw the sketch on the face.</p>
+        </>
+      )}
+
+      {f.type === "faceoffset" && (
+        <>
+          <Field label="Distance" feature={f} field="distance" scope={scope} onChange={onChange} />
+          <p>
+            <strong>
+              {f.faces.length} face{f.faces.length === 1 ? "" : "s"}
+            </strong>
+          </p>
+          <p className="muted">Faces move along their normals: positive adds material (a hole gets smaller), negative removes it. Works on curved faces too. Click faces in the viewport to add or remove them.</p>
+        </>
+      )}
+
+      {f.type === "replaceface" && (
+        <>
+          <PlaneRefFields f={f} planes={planes} scope={scope} onChange={onChange} onPick={onPickRef} picking={pickingRef} label="Up to" />
+          <p>
+            <strong>
+              {f.faces.length} face{f.faces.length === 1 ? "" : "s"} to replace
+            </strong>
+          </p>
+          <p className="muted">The body grows or is trimmed so these faces lie on the target's plane. Click faces in the viewport to add or remove them.</p>
+        </>
+      )}
+
+      {f.type === "align" && (
+        <>
+          <Select
+            label="Reference"
+            value={f.reference}
+            options={[["", "World origin"], ...bodies.map((b) => [b.id, b.name] as [string, string])]}
+            onChange={(reference) => onChange({ reference, bodies: f.bodies.filter((b) => b !== reference) })}
+          />
+          {(["x", "y", "z"] as const).map((axis) => (
+            <Select key={axis} label={axis.toUpperCase()} value={f[axis]} options={ALIGN_MODES} onChange={(v) => onChange({ [axis]: v } as Partial<Feature>)} />
+          ))}
+          <p>
+            <strong>
+              {f.bodies.length} bod{f.bodies.length === 1 ? "y" : "ies"} to move
+            </strong>
+          </p>
+          <ul className="body-list">
+            {f.bodies.map((id) => (
+              <li key={id}>
+                <span>{bodies.find((b) => b.id === id)?.name ?? "Missing body"}</span>
+                <button className="ghost" title="Remove" onClick={() => onChange({ bodies: f.bodies.filter((x) => x !== id) })}>
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="muted">Bounding boxes line up on each axis: min, centre or max. Click bodies in the viewport to add or remove them.</p>
+        </>
+      )}
+
       {f.type === "pattern" && (
         <>
           <Select label="Type" value={f.mode} options={[["linear", "Linear"], ["circular", "Circular"]]} onChange={(mode) => onChange({ mode })} />
@@ -461,6 +570,59 @@ export function PropertiesPanel({ feature: f, sketches, status, onChange, onEdit
         </>
       )}
     </aside>
+  );
+}
+
+const ALIGN_MODES: [AlignMode, string][] = [
+  ["none", "Leave"],
+  ["min", "Min"],
+  ["center", "Centre"],
+  ["max", "Max"],
+];
+
+/** Where a feature's plane comes from: a standard plane, a construction plane or a picked face; plus the offset. */
+function PlaneRefFields({
+  f,
+  planes,
+  scope,
+  onChange,
+  onPick,
+  picking,
+  label = "Plane",
+}: {
+  f: Feature & PlaneRef;
+  planes: { id: string; name: string }[];
+  scope: Scope;
+  onChange: (patch: Partial<Feature>) => void;
+  onPick?: () => void;
+  picking?: boolean;
+  label?: string;
+}) {
+  const value = f.planeId ? `plane:${f.planeId}` : f.face ? "face" : f.plane;
+  const options: [string, string][] = [
+    ...(f.face ? [["face", `Face ${shortName(f.face)}`] as [string, string]] : []),
+    ...planes.map((p) => [`plane:${p.id}`, p.name] as [string, string]),
+    ...PLANES,
+  ];
+  return (
+    <>
+      <Select
+        label={label}
+        value={value}
+        options={options}
+        onChange={(v) => {
+          if (v === "face") return;
+          if (v.startsWith("plane:")) onChange({ planeId: v.slice(6), face: undefined } as Partial<Feature>);
+          else onChange({ plane: v as PlaneName, planeId: undefined, face: undefined } as Partial<Feature>);
+        }}
+      />
+      <Field label="Offset" feature={f} field="offset" scope={scope} onChange={onChange} />
+      {onPick && (
+        <button className="pick-axis" disabled={picking} onClick={onPick} title="Click a planar face in the view: its plane is used">
+          {picking ? "Click a planar face in the view…" : "↗ Pick a face in view"}
+        </button>
+      )}
+    </>
   );
 }
 

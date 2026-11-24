@@ -158,7 +158,7 @@ button.wide { width: 100%; margin: 4px 0 10px; }
 .viewport-wrap { position: absolute; inset: 0; overflow: hidden; }
 .model-overlay { position: absolute; left: 0; top: 0; z-index: 4; pointer-events: none; will-change: transform; }
 .model-overlay > * { pointer-events: auto; transform: translate(28px, 24px); }
-.ov-menu { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: rgba(255, 255, 255, 0.96); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 20px rgba(29, 38, 51, 0.16); white-space: nowrap; }
+.ov-menu { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px; max-width: 440px; background: rgba(255, 255, 255, 0.96); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 20px rgba(29, 38, 51, 0.16); white-space: nowrap; }
 .ov-menu button { padding: 4px 9px; }
 .ov-hint { color: var(--muted); font-size: 12px; }
 .ov-title { font-size: 12px; margin-right: 4px; }

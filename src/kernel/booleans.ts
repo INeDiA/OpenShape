@@ -76,6 +76,8 @@ function run(kind: "Fuse" | "Cut" | "Common" | "Splitter", shape: Shape3D, tools
 export const fuseShapes = (shape: Shape3D, tools: Shape3D[], opts?: Options) => run("Fuse", shape, tools.map(wrapped), opts);
 export const cutShapes = (shape: Shape3D, tools: Shape3D[], opts?: Options) => run("Cut", shape, tools.map(wrapped), opts);
 export const commonShapes = (shape: Shape3D, tools: Shape3D[], opts?: Options) => run("Common", shape, tools.map(wrapped), opts);
+/** General split: `shape` cut by the tools (faces, edges, solids), without merging anything back. */
+export const splitShape = (shape: Shape3D, tools: { wrapped: unknown }[]) => run("Splitter", shape, tools.map((t) => t.wrapped));
 
 /**
  * `shape` grown by `distance` in every direction (shrunk when negative): a

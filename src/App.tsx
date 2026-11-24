@@ -22,6 +22,12 @@ import {
   makePattern,
   makePushPull,
   makeShell,
+  makeSplit,
+  makeSplitFace,
+  makeFaceOffset,
+  makeReplaceFace,
+  makeAlign,
+  makeSymmetry,
   makeSketch,
   makeSketchOnFace,
   makeSketchOnPlane,
@@ -177,10 +183,26 @@ export function App() {
   // so its edges/faces can be picked: fillet/chamfer (edges), shell and push/pull (faces).
   const selectedFeature = doc.features.find((f) => f.id === selectedId) ?? null;
   const pickingFeature = !editingSketchId && (selectedFeature?.type === "fillet" || selectedFeature?.type === "chamfer" || selectedFeature?.type === "cove") ? selectedFeature : null;
-  const faceFeature = !editingSketchId && (selectedFeature?.type === "shell" || selectedFeature?.type === "pushpull" || selectedFeature?.type === "draft" || selectedFeature?.type === "boolean" || selectedFeature?.type === "layflat" || selectedFeature?.type === "teardrop" || selectedFeature?.type === "holefit" || selectedFeature?.type === "insert") ? selectedFeature : null;
+  const faceFeature = !editingSketchId && selectedFeature && FACE_FEATURES.has(selectedFeature.type) ? selectedFeature : null;
   // A draft first asks for its neutral face, then for the faces to tilt.
   const [repickNeutral, setRepickNeutral] = useState(false);
   const pickNeutral = faceFeature?.type === "draft" && (repickNeutral || !faceFeature.neutral);
+  // Split, Symmetry, Replace face: the next click picks the face their plane comes from.
+  const [refPickFor, setRefPickFor] = useState<string | null>(null);
+  const pickRef = !!faceFeature && refPickFor === faceFeature.id;
+  // Escape leaves a feature that's picking faces, edges or bodies (first a pending plane pick).
+  const pickingId = pickingFeature?.id ?? faceFeature?.id ?? null;
+  useEffect(() => {
+    if (!pickingId) return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (e.key !== "Escape" || tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      if (refPickFor) setRefPickFor(null);
+      else setSelectedId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pickingId, refPickFor]);
   const rollbackId = pickingFeature?.id ?? faceFeature?.id;
 
 
@@ -381,6 +403,34 @@ export function App() {
   };
 
   const onPickFace = (name: string | null, additive: boolean) => {
+    if (faceFeature && pickRef && (faceFeature.type === "split" || faceFeature.type === "symmetry" || faceFeature.type === "replaceface")) {
+      if (!name) return;
+      if (!faceInfo.get(name)) return flash("Pick a planar face: its plane is used");
+      const faces = faceFeature.type === "replaceface" ? faceFeature.faces.filter((n) => n !== name) : undefined;
+      commit(updateFeature(doc, faceFeature.id, { face: name, planeId: undefined, offset: 0, ...(faces ? { faces } : {}) }));
+      setRefPickFor(null);
+      return;
+    }
+    if (faceFeature?.type === "split" || faceFeature?.type === "symmetry") {
+      const body = name ? bodyOfFace(name) : null;
+      if (body) commit(updateFeature(doc, faceFeature.id, { body }));
+      return;
+    }
+    if (faceFeature?.type === "align") {
+      const body = name ? bodyOfFace(name) : null;
+      if (!body) return;
+      if (body === faceFeature.reference) return flash("That's the reference body: it stays where it is");
+      const bodies = faceFeature.bodies.includes(body) ? faceFeature.bodies.filter((b) => b !== body) : [...faceFeature.bodies, body];
+      commit(updateFeature(doc, faceFeature.id, { bodies }));
+      return;
+    }
+    if (faceFeature?.type === "faceoffset" || faceFeature?.type === "replaceface") {
+      if (!name) return;
+      if (faceFeature.type === "replaceface" && name === faceFeature.face) return flash("That's the target face");
+      const faces = faceFeature.faces.includes(name) ? faceFeature.faces.filter((n) => n !== name) : [...faceFeature.faces, name];
+      commit(updateFeature(doc, faceFeature.id, { faces }));
+      return;
+    }
     if (faceFeature?.type === "boolean") {
       const body = name ? bodyOfFace(name) : null;
       if (!body) return;
@@ -671,6 +721,31 @@ export function App() {
         { id: "pushpull", label: "Push/Pull", icon: "pushpull", disabled: !singlePlanarFace, title: singlePlanarFace ? "Move the selected planar face along its normal" : "Select one planar face first", run: () => (add(makePushPull(doc, singlePlanarFace!)), manip.clear()) },
         { id: "shell", label: "Shell", icon: "shell", disabled: !hasBody(doc), title: "Hollow the body; selected faces become openings", run: () => (add(makeShell(doc, liveFaces)), manip.clear()) },
         { id: "draft", label: "Draft", icon: "draft", disabled: !hasBody(doc), title: "Tilt faces by an angle (moulded parts): pick the neutral face, then the faces", run: () => (add(makeDraft(doc, liveFaces)), setRepickNeutral(false), manip.clear()) },
+        "separator",
+        { id: "faceoffset", label: "Face offset", icon: "faceoffset", disabled: !hasBody(doc), title: "Move faces of any shape along their normals, e.g. to make a hole smaller (select them, or click them next)", run: () => (add(makeFaceOffset(doc, liveFaces)), manip.clear()) },
+        {
+          id: "replaceface",
+          label: "Replace face",
+          icon: "replaceface",
+          disabled: !hasBody(doc),
+          title: "Extend or trim faces up to a target face or plane: select the faces (the last one picked can be the target), or click them next",
+          run: () => {
+            // With two or more faces selected, the last one is the target.
+            const target = liveFaces.length >= 2 && faceInfo.get(liveFaces[liveFaces.length - 1]) ? liveFaces[liveFaces.length - 1] : undefined;
+            const f = makeReplaceFace(doc, target ? liveFaces.slice(0, -1) : liveFaces, target);
+            add(f);
+            if (!target) setRefPickFor(f.id);
+            manip.clear();
+          },
+        },
+        {
+          id: "splitface",
+          label: "Split faces",
+          icon: "splitface",
+          disabled: !baseSketch || !hasBody(doc),
+          title: baseSketch ? `Split the faces that ${baseSketch.name}'s curves lie on (sketch on a face, then draw the dividing lines)` : "Needs a sketch drawn on a face of the model",
+          run: () => add(makeSplitFace(doc, baseSketch!.id)),
+        },
       ],
     },
     {
@@ -689,6 +764,43 @@ export function App() {
         },
         { id: "mirror", label: "Mirror", icon: "mirror", disabled: !hasBody(doc), title: "Mirror the body across a plane", run: () => add(makeMirror(doc)) },
         { id: "pattern", label: "Pattern", icon: "pattern", disabled: !hasBody(doc), title: "Repeat the body (linear or circular)", run: () => add(makePattern(doc)) },
+        "separator",
+        {
+          id: "split",
+          label: "Split body",
+          icon: "split",
+          disabled: !hasBody(doc),
+          title: "Cut a body in two with a plane, a planar face or another body (select the body and/or a planar face or construction plane first)",
+          run: () => {
+            const f = makeSplit(doc, sel.body ?? (singlePlanarFace ? bodyOfFace(singlePlanarFace) ?? undefined : undefined), singlePlanarFace ?? undefined);
+            add(selectedPlane ? { ...f, planeId: selectedPlane } : f);
+            manip.clear();
+          },
+        },
+        {
+          id: "symmetry",
+          label: "Symmetry",
+          icon: "symmetry",
+          disabled: !hasBody(doc),
+          title: "Make a body symmetric: keep one side of a plane and mirror it onto the other",
+          run: () => {
+            const f = makeSymmetry(doc, sel.body ?? (singlePlanarFace ? bodyOfFace(singlePlanarFace) ?? undefined : undefined), singlePlanarFace ?? undefined);
+            add(selectedPlane ? { ...f, planeId: selectedPlane } : f);
+            manip.clear();
+          },
+        },
+        {
+          id: "align",
+          label: "Align",
+          icon: "align",
+          disabled: !hasBody(doc),
+          title: "Line up bodies with a reference body or the origin (bounding boxes: min, centre or max on each axis)",
+          run: () => {
+            const others = bodyList.map((b) => b.id).filter((id) => id !== sel.body);
+            add(makeAlign(doc, sel.body ? [sel.body] : [], sel.body ? (others[0] ?? "") : ""));
+            manip.clear();
+          },
+        },
       ],
     },
     {
@@ -773,11 +885,11 @@ export function App() {
   const commandById = (id: string) => toolMenus.flatMap((g) => g.items).find((i): i is Command => typeof i === "object" && "run" in i && i.id === id);
   const pick = (...ids: string[]) => ids.map(commandById).filter((c): c is Command => !!c);
   contextRef.current = {
-    face: pick("plane", "layflat", "draft"),
+    face: pick("plane", "faceoffset", "replaceface", "split", "layflat", "draft"),
     cylinder: pick("teardrop", "holefit", "insert"),
-    faces: pick("plane"),
+    faces: pick("plane", "faceoffset", "replaceface"),
     edge: pick("plane"),
-    body: bodyList.length > 1 ? pick("boolean", "mirror", "pattern") : pick("mirror", "pattern"),
+    body: bodyList.length > 1 ? pick("boolean", "split", "align", "mirror", "pattern") : pick("split", "symmetry", "mirror", "pattern"),
   };
 
   return (
@@ -874,8 +986,14 @@ export function App() {
             commit(updateFeature(doc, pickingFeature.id, { edges }));
           }}
           selectedFaces={
-            faceFeature?.type === "shell" || faceFeature?.type === "teardrop" || faceFeature?.type === "holefit" || faceFeature?.type === "insert"
+            faceFeature?.type === "shell" || faceFeature?.type === "teardrop" || faceFeature?.type === "holefit" || faceFeature?.type === "insert" || faceFeature?.type === "faceoffset"
               ? faceFeature.faces
+              : faceFeature?.type === "replaceface"
+                ? [...faceFeature.faces, ...(faceFeature.face && !pickRef ? [faceFeature.face] : [])]
+              : faceFeature?.type === "split" || faceFeature?.type === "symmetry"
+                ? faceFeature.face && !pickRef ? [faceFeature.face] : []
+              : faceFeature?.type === "align"
+                ? (mesh?.faceNames.filter((_, i) => faceFeature.bodies.includes(mesh.faceBody[i])) ?? [])
               : faceFeature?.type === "pushpull" || faceFeature?.type === "layflat"
                 ? [faceFeature.face]
                 : faceFeature?.type === "draft"
@@ -886,7 +1004,15 @@ export function App() {
                     ? (mesh?.faceNames.filter((_, i) => faceFeature.tools.includes(mesh.faceBody[i])) ?? [])
                     : liveFaces
           }
-          selectedBody={faceFeature?.type === "boolean" ? faceFeature.target || null : manip.selection.body}
+          selectedBody={
+            faceFeature?.type === "boolean"
+              ? faceFeature.target || null
+              : faceFeature?.type === "split" || faceFeature?.type === "symmetry"
+                ? (faceFeature.body ?? null)
+                : faceFeature?.type === "align"
+                  ? faceFeature.reference || null
+                  : manip.selection.body
+          }
           onPickFace={onPickFace}
           pickableRegions={pickableRegions}
           axisCandidates={manip.axisCandidates}
@@ -950,21 +1076,7 @@ export function App() {
         )}
         {faceFeature && (
           <div className="overlay picking-banner">
-            {faceFeature.type === "shell"
-              ? "Click faces to open"
-              : faceFeature.type === "draft"
-                ? pickNeutral
-                  ? "Click the neutral face (its plane stays fixed)"
-                  : "Click faces to draft"
-                : faceFeature.type === "layflat"
-                  ? "Click the planar face to put on the bed"
-                  : faceFeature.type === "teardrop" || faceFeature.type === "holefit" || faceFeature.type === "insert"
-                  ? "Click the holes (their cylindrical faces)"
-                  : faceFeature.type === "boolean"
-                  ? !faceFeature.target
-                    ? "Click the target body"
-                    : `Click bodies to ${faceFeature.op === "join" ? "join to it" : faceFeature.op === "cut" ? "subtract from it" : "intersect with it"}`
-                  : "Click the planar face to move"}{" "}
+            {faceBanner(faceFeature, pickNeutral, pickRef)}{" "}
             · showing the model before <strong>{faceFeature.name}</strong>
           </div>
         )}
@@ -998,6 +1110,9 @@ export function App() {
         onPickNeutral={() => setRepickNeutral(true)}
         pickingNeutral={pickNeutral}
         onPickAxis={selected?.type === "revolve" ? () => manip.repickAxis(selected) : undefined}
+        planes={doc.features.filter((f) => f.type === "plane").map((f) => ({ id: f.id, name: f.name }))}
+        onPickRef={() => selected && setRefPickFor(selected.id)}
+        pickingRef={pickRef}
         pickingAxis={manip.pickingAxis}
       />
       </>
@@ -1018,4 +1133,37 @@ export function App() {
       </footer>
     </div>
   );
+}
+
+/** Features edited by clicking faces or bodies on the model as it was before them. */
+const FACE_FEATURES = new Set<Feature["type"]>(["shell", "pushpull", "draft", "boolean", "layflat", "teardrop", "holefit", "insert", "faceoffset", "replaceface", "split", "symmetry", "align"]);
+
+/** What the banner over the viewport asks for while such a feature is selected. */
+function faceBanner(f: Feature, pickNeutral: boolean, pickRef: boolean): string {
+  switch (f.type) {
+    case "shell":
+      return "Click faces to open";
+    case "draft":
+      return pickNeutral ? "Click the neutral face (its plane stays fixed)" : "Click faces to draft";
+    case "layflat":
+      return "Click the planar face to put on the bed";
+    case "teardrop":
+    case "holefit":
+    case "insert":
+      return "Click the holes (their cylindrical faces)";
+    case "boolean":
+      return !f.target ? "Click the target body" : `Click bodies to ${f.op === "join" ? "join to it" : f.op === "cut" ? "subtract from it" : "intersect with it"}`;
+    case "faceoffset":
+      return "Click faces to offset";
+    case "replaceface":
+      return pickRef ? "Click the target face: the selected faces will reach its plane" : "Click the faces to replace";
+    case "split":
+      return pickRef ? "Click a planar face to split with its plane" : "Click the body to split";
+    case "symmetry":
+      return pickRef ? "Click a planar face: its plane becomes the plane of symmetry" : "Click the body to make symmetric";
+    case "align":
+      return "Click the bodies to move (the reference is chosen in Properties)";
+    default:
+      return "Click the planar face to move";
+  }
 }

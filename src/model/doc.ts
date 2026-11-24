@@ -1,4 +1,4 @@
-import type { BooleanOp, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, PlaneName, ImportFeature, MirrorFeature, PatternFeature, PushPullFeature, RevolveFeature, ShellFeature, SketchFeature, CoveFeature, SweepFeature, LoftFeature, DraftFeature, BooleanFeature, BodyId, LayFlatFeature, PlaneFeature, TeardropFeature, HoleFitFeature, InsertFeature } from "./types";
+import type { BooleanOp, Document, EdgeTreatmentFeature, ExtrudeFeature, Feature, PlaneName, ImportFeature, MirrorFeature, PatternFeature, PushPullFeature, RevolveFeature, ShellFeature, SketchFeature, CoveFeature, SweepFeature, LoftFeature, DraftFeature, BooleanFeature, BodyId, LayFlatFeature, PlaneFeature, TeardropFeature, HoleFitFeature, InsertFeature, SplitFeature, SplitFaceFeature, FaceOffsetFeature, ReplaceFaceFeature, AlignFeature, SymmetryFeature, PlaneRef } from "./types";
 import { emptySketch, type SketchData } from "../sketch/model";
 import { addCircle, addConstraint, addRectangle } from "../sketch/builders";
 
@@ -106,6 +106,8 @@ export function sketchUses(f: Feature): { sketchId: string; regions?: string[] }
       return [{ sketchId: f.sketchId, regions: f.regions }, { sketchId: f.pathId }];
     case "loft":
       return f.sections.map((sketchId) => ({ sketchId }));
+    case "splitface":
+      return [{ sketchId: f.sketchId }];
     default:
       return [];
   }
@@ -140,6 +142,34 @@ export function makeShell(doc: Document, faces: string[]): ShellFeature {
 
 export function makeMirror(doc: Document): MirrorFeature {
   return { type: "mirror", id: newId("mi"), name: nextName(doc, "Mirror"), suppressed: false, plane: "YZ", offset: 0 };
+}
+
+/** Default plane reference: a planar face when one is given, else the YZ plane. */
+const planeRef = (face?: string): PlaneRef => (face ? { plane: "YZ", offset: 0, face } : { plane: "YZ", offset: 0 });
+
+export function makeSplit(doc: Document, body?: BodyId, face?: string): SplitFeature {
+  return { type: "split", id: newId("sp"), name: nextName(doc, "Split"), suppressed: false, ...planeRef(face), ...(body ? { body } : {}) };
+}
+
+export function makeSplitFace(doc: Document, sketchId: string): SplitFaceFeature {
+  return { type: "splitface", id: newId("sf"), name: nextName(doc, "Split faces"), suppressed: false, sketchId };
+}
+
+export function makeFaceOffset(doc: Document, faces: string[], distance = 2): FaceOffsetFeature {
+  return { type: "faceoffset", id: newId("fo"), name: nextName(doc, "Face offset"), suppressed: false, faces, distance };
+}
+
+/** Without a target the reference is the XY plane: the UI asks for a target face next. */
+export function makeReplaceFace(doc: Document, faces: string[], target?: string): ReplaceFaceFeature {
+  return { type: "replaceface", id: newId("rf"), name: nextName(doc, "Replace face"), suppressed: false, faces, plane: "XY", offset: 0, ...(target ? { face: target } : {}) };
+}
+
+export function makeAlign(doc: Document, bodies: BodyId[], reference: BodyId = ""): AlignFeature {
+  return { type: "align", id: newId("al"), name: nextName(doc, "Align"), suppressed: false, bodies, reference, x: "none", y: "none", z: "min" };
+}
+
+export function makeSymmetry(doc: Document, body?: BodyId, face?: string): SymmetryFeature {
+  return { type: "symmetry", id: newId("sy"), name: nextName(doc, "Symmetry"), suppressed: false, ...planeRef(face), flip: false, ...(body ? { body } : {}) };
 }
 
 export function makePattern(doc: Document): PatternFeature {

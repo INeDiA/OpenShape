@@ -250,10 +250,12 @@ export interface LayFlatFeature extends FeatureBase {
   face: string;
 }
 
-/** Moves and/or rotates one body (rotation about an axis through `pivot`, then translation). */
+/** Moves, rotates and/or scales one body: uniform scale about `pivot`, then rotation about an axis through it, then translation. */
 export interface TransformFeature extends FeatureBase {
   type: "transform";
   body: BodyId;
+  /** Uniform scale factor (1 when absent). */
+  scale?: number;
   dx: number;
   dy: number;
   dz: number;
@@ -262,6 +264,69 @@ export interface TransformFeature extends FeatureBase {
   pivotX: number;
   pivotY: number;
   pivotZ: number;
+}
+
+/**
+ * A plane referenced by a feature: a construction plane (`planeId`), else a
+ * planar face (`face`), else a standard plane; moved `offset` along its normal.
+ */
+export interface PlaneRef {
+  plane: PlaneName;
+  offset: number;
+  planeId?: string;
+  face?: string;
+}
+
+/**
+ * Cuts a body in two with a plane, or with another body (`toolBody`: the part
+ * inside it). The piece on the plane's normal side (or outside the tool) keeps
+ * the body's id; the other becomes a new body identified by this feature's id.
+ */
+export interface SplitFeature extends FeatureBase, PlaneRef {
+  type: "split";
+  /** Body to split; the most recently touched one when absent. */
+  body?: BodyId;
+  toolBody?: BodyId;
+}
+
+/** Imprints the curves of a sketch on the faces they lie on, splitting those faces. */
+export interface SplitFaceFeature extends FeatureBase {
+  type: "splitface";
+  sketchId: string;
+}
+
+/** Moves faces (any shape) along their normals: positive adds material, negative removes it. */
+export interface FaceOffsetFeature extends FeatureBase {
+  type: "faceoffset";
+  faces: string[];
+  distance: number;
+}
+
+/** Extends or trims the body so the selected faces lie on the target plane (a face of the model, or a plane). */
+export interface ReplaceFaceFeature extends FeatureBase, PlaneRef {
+  type: "replaceface";
+  faces: string[];
+}
+
+export type AlignMode = "none" | "min" | "center" | "max";
+
+/** Moves bodies so their bounding boxes line up with a reference body (or the origin), axis by axis. */
+export interface AlignFeature extends FeatureBase {
+  type: "align";
+  bodies: BodyId[];
+  /** Reference body; "" for the world origin. */
+  reference: BodyId;
+  x: AlignMode;
+  y: AlignMode;
+  z: AlignMode;
+}
+
+/** Makes a body symmetric: keeps the half on one side of the plane and mirrors it onto the other. */
+export interface SymmetryFeature extends FeatureBase, PlaneRef {
+  type: "symmetry";
+  body?: BodyId;
+  /** Keep the half behind the plane instead of the one its normal points to. */
+  flip: boolean;
 }
 
 /** A solid imported from a STEP or STL file, embedded in the document. */
@@ -289,6 +354,12 @@ export type Feature =
   | MirrorFeature
   | PatternFeature
   | TransformFeature
+  | SplitFeature
+  | SplitFaceFeature
+  | FaceOffsetFeature
+  | ReplaceFaceFeature
+  | AlignFeature
+  | SymmetryFeature
   | BooleanFeature
   | LayFlatFeature
   | PlaneFeature

@@ -57,7 +57,7 @@ Every feature has:
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | Unique within the document. Referenced by other features. |
-| `type` | string | `sketch`, `plane`, `extrude`, `revolve`, `sweep`, `loft`, `fillet`, `chamfer`, `cove`, `draft`, `pushpull`, `shell`, `mirror`, `pattern`, `transform`, `boolean`, `layflat`, `teardrop`, `holefit`, `insert`, `import` |
+| `type` | string | `sketch`, `plane`, `extrude`, `revolve`, `sweep`, `loft`, `fillet`, `chamfer`, `cove`, `draft`, `pushpull`, `shell`, `mirror`, `pattern`, `transform`, `split`, `splitface`, `faceoffset`, `replaceface`, `align`, `symmetry`, `boolean`, `layflat`, `teardrop`, `holefit`, `insert`, `import` |
 | `name` | string | Display name. |
 | `suppressed` | boolean | Skipped during replay when true. |
 | `exprs` | object, optional | Maps a numeric field name to an expression, e.g. `{ "distance": "height / 2" }`. The field still holds the last computed number. |
@@ -84,7 +84,14 @@ Type-specific fields:
 - **shell**: `faces` (persistent names of faces to open), `thickness` (inward).
 - **mirror**: `plane` (`"XY"`, `"XZ"`, `"YZ"`), `offset`. The mirrored copy is joined to the body.
 - **pattern**: `mode` (`"linear"` or `"circular"`), `axis` (`"X"`, `"Y"`, `"Z"`), `count` (instances including the original), `spacing` (linear, mm), `angle` (circular, degrees; 360 spreads evenly). Copies are joined.
-- **transform**: `body` (body id), `dx`, `dy`, `dz` (translation, mm), `axis` and `angle` (rotation in degrees about an axis through `pivotX/Y/Z`, applied before the translation).
+- **transform**: `body` (body id), `dx`, `dy`, `dz` (translation, mm), `axis` and `angle` (rotation in degrees about an axis through `pivotX/Y/Z`), `scale?` (uniform factor about the pivot, default 1). Order: scale, rotate, translate.
+- **Plane references** (`split`, `symmetry`, `replaceface`): `plane` (`"XY"`, `"XZ"`, `"YZ"`), `offset` (mm along the plane's normal), `planeId?` (a construction plane, takes precedence), `face?` (a planar face whose plane is used, after `planeId`).
+- **split**: a plane reference, `body?` (body id; the latest body when absent), `toolBody?` (split with another body instead of the plane). The piece on the plane's normal side (or outside the tool body) keeps the body's id; the other becomes a new body with the split's id, its faces named `<splitId>:<original name>`. The cut faces are `<splitId>:cut` and `<splitId>:cut2`. A tool body is kept.
+- **splitface**: `sketchId`. The sketch's curves (not construction geometry) divide the faces they lie on; the pieces of a face named `n` become `n#1`, `n#2`… ordered by position.
+- **faceoffset**: `faces` (persistent names, any surface type, one body), `distance` (mm; positive adds material). Each moved face keeps its name; new side faces are `<id>:side`.
+- **replaceface**: a plane reference (the target) and `faces` (persistent names, one body). The body is extended or trimmed along each face's normal until the face lies on the target plane; the new face keeps the replaced face's name. The target can't be perpendicular to a face.
+- **align**: `bodies` (body ids to move), `reference` (body id, or `""` for the world origin), `x`, `y`, `z` (`"none"`, `"min"`, `"center"`, `"max"`): each body is translated so its bounding box matches the reference's on the chosen axes. Faces keep their names.
+- **symmetry**: a plane reference, `body?`, `flip` (keep the half behind the plane instead of the one its normal points to). The kept half is mirrored onto the other side and joined; mirrored faces are named `<id>:copy1:<name>`, the faces on the plane `<id>:cut`.
 - **teardrop**: `faces` (cylindrical hole faces), `flat` (cut the roof flat at the top of the hole). Adds a 45° roof over each horizontal hole (Z up) so it prints without supports; vertical holes are refused. New faces are named `<id>:roof:<hole face>`.
 - **holefit**: `faces` (cylindrical hole faces), `amount` (mm added to each radius, along the whole hole). Pins are refused. New faces are named `<id>:hole:<hole face>`.
 - **insert**: seats for heat-set threaded inserts. `faces` (cylindrical pilot-hole faces), `size` (`M2`, `M2.5`, `M3`, `M4`, `M5` or `custom`: the preset the numbers came from), `diameter` and `depth` (mm, the seat cut from the hole's opening), `flip` (through holes: seat at the lower opening instead of the upper). Blind holes use their open end. Pins, and holes already wider than the seat, are refused. New faces are named `<id>:seat:<hole face>`.
@@ -98,7 +105,7 @@ A document can hold several separate solids. A body is identified by the id of
 the feature that created it: an `extrude`, `revolve`, `sweep`, `loft` or `import` with `op: "new"`.
 `join`, `cut` and `intersect` combine with the body named by the optional
 `target` field, or with the most recently modified body when `target` is absent.
-`mirror` and `pattern` also accept `target`. Features that reference topology
+`mirror` and `pattern` also accept `target`. `split` creates a second body (identified by the split's id). Features that reference topology
 (`pushpull`, `shell`, `fillet`, `chamfer`, `cove`, `draft`, a sketch on a face) act on the body
 that owns the referenced face or edge.
 

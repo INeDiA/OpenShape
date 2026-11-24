@@ -219,7 +219,33 @@ export function validateDocument(raw: unknown): Document {
       case "transform":
         str(f.body, `${at}.body`);
         for (const k of ["dx", "dy", "dz", "angle", "pivotX", "pivotY", "pivotZ"]) num(f[k], `${at}.${k}`);
+        if (f.scale !== undefined) {
+          num(f.scale, `${at}.scale`);
+          need((f.scale as number) > 0, `${at}.scale must be > 0`);
+        }
         need(["X", "Y", "Z"].includes(f.axis as string), `${at}.axis is invalid`);
+        break;
+      case "split":
+      case "symmetry":
+      case "replaceface":
+        planeRef(f, at, planeIds);
+        if (f.body !== undefined) str(f.body, `${at}.body`);
+        if (f.type === "split" && f.toolBody !== undefined) str(f.toolBody, `${at}.toolBody`);
+        if (f.type === "symmetry") need(typeof f.flip === "boolean", `${at}.flip must be true or false`);
+        if (f.type === "replaceface") need(Array.isArray(f.faces) && f.faces.every((x) => typeof x === "string"), `${at}.faces must be a list of names`);
+        break;
+      case "splitface":
+        str(f.sketchId, `${at}.sketchId`);
+        need(sketchIds.has(f.sketchId as string), `${at} references a sketch that doesn't precede it`);
+        break;
+      case "faceoffset":
+        need(Array.isArray(f.faces) && f.faces.every((x) => typeof x === "string"), `${at}.faces must be a list of names`);
+        num(f.distance, `${at}.distance`);
+        break;
+      case "align":
+        need(Array.isArray(f.bodies) && f.bodies.every((x) => typeof x === "string"), `${at}.bodies must be a list of body ids`);
+        need(typeof f.reference === "string", `${at}.reference must be a body id or ""`);
+        for (const k of ["x", "y", "z"]) need(["none", "min", "center", "max"].includes(f[k] as string), `${at}.${k} is invalid`);
         break;
       case "import":
         str(f.fileName, `${at}.fileName`);
@@ -237,6 +263,14 @@ export function validateDocument(raw: unknown): Document {
   const doc: Document = { variables: variables as Variable[], features: raw.features as Feature[] };
   if (raw.drawing !== undefined) doc.drawing = validateDrawing(raw.drawing);
   return doc;
+}
+
+/** Fields of a PlaneRef: a standard plane and offset, optionally a construction plane or a face. */
+function planeRef(f: Record<string, unknown>, at: string, planeIds: Set<string>) {
+  need(["XY", "XZ", "YZ"].includes(f.plane as string), `${at}.plane is invalid`);
+  num(f.offset, `${at}.offset`);
+  if (f.face !== undefined) str(f.face, `${at}.face`);
+  if (f.planeId !== undefined) need(planeIds.has(f.planeId as string), `${at} references a plane that doesn't precede it`);
 }
 
 const VIEW_DIRS = ["front", "back", "top", "bottom", "left", "right", "iso"];

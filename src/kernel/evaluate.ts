@@ -9,6 +9,8 @@ import {
   getOC,
   importSTEP,
   makeCompound,
+  makeVertex,
+  measureDistanceBetween,
   makePolygon,
   makeSolid,
   Plane,
@@ -32,11 +34,12 @@ import {
   type FaceNames,
   type NamedShape,
 } from "./naming";
-import type { BodyId, BooleanOp, Document, Feature, FeatureStatus, MeshData, PlaneFeature, PlanePreview, RegionPreview, SketchFeature, SketchPreview } from "../model/types";
+import type { BodyId, BooleanOp, Document, Feature, FeatureStatus, MeshData, PlaneFeature, PlanePreview, PlaneRef, RegionPreview, SketchFeature, SketchPreview } from "../model/types";
 import { frameToLocal, frameToWorld, planeFrame, standardFrame, type Frame, type Vec3 } from "../model/frame";
 import { entityMap, pointOf } from "../sketch/model";
 import { curvePolyline } from "../sketch/curves";
-import { commonShapes, cutShapes, fuseShapes, offsetSolid } from "./booleans";
+import { commonShapes, cutShapes, fuseShapes, offsetSolid, splitByPlane, splitShape } from "./booleans";
+import { halfSpace, hasSolid, prism, sketchEdges, thickenFace } from "./modelingOps";
 import { coveTool } from "./cove";
 import { arcMidpoint, findLoops, loopPolygon, nestLoops, regionInteriorPoint, sketchRegions, type Loop } from "../sketch/profiles";
 import { parseSTL } from "../io/stl";
@@ -498,6 +501,42 @@ function constructionPlane(f: PlaneFeature, bodies: Bodies): PlanePreview {
   }
 }
 
+/** Point and unit normal of a plane a feature refers to (see PlaneRef). */
+function refPlane(r: PlaneRef, bodies: Bodies, planes: Map<string, PlanePreview>): { point: Vec3; n: Vec3 } {
+  let point: Vec3, n: Vec3;
+  if (r.planeId) {
+    const p = planes.get(r.planeId);
+    if (!p) throw new Error("Its construction plane is missing, suppressed or failed");
+    point = p.center;
+    n = p.frame.n;
+  } else if (r.face) {
+    const f = planarFaceFrame(bodies.withFace(r.face).shape, r.face, 0);
+    point = f.point;
+    n = f.normal;
+  } else {
+    const fr = standardFrame(r.plane, 0);
+    point = fr.origin;
+    n = fr.n;
+  }
+  const o = r.offset || 0;
+  return { point: [point[0] + n[0] * o, point[1] + n[1] * o, point[2] + n[2] * o], n };
+}
+
+const dot3 = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+/** Whether `p` is within `tol` of a face. */
+function onFace(p: Vec3, face: Face, tol = 1e-3): boolean {
+  const v = makeVertex(p);
+  try {
+    return measureDistanceBetween(v, face) < tol;
+  } finally {
+    v.delete();
+  }
+}
+
+/** A body (or several solids) as one shape. */
+const oneShape = (solids: Shape3D[]): Shape3D => (solids.length === 1 ? solids[0] : (makeCompound(solids) as unknown as Shape3D));
+
 async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, SketchContext>, previews: SketchPreview[], planes: Map<string, PlanePreview>): Promise<string | undefined> {
   const sketchOf = (id: string) => {
     const s = sketches.get(id);
@@ -758,9 +797,159 @@ async function applyFeature(f: Feature, bodies: Bodies, sketches: Map<string, Sk
       const t = bodies.target(f.body);
       if (!t) throw new Error("Body no longer exists");
       let shape = t.shape.shape.clone();
+      const scale = f.scale ?? 1;
+      if (!(scale > 0)) throw new Error("Scale must be > 0");
+      if (scale !== 1) shape = shape.scale(scale, [f.pivotX, f.pivotY, f.pivotZ]);
       if (f.angle) shape = shape.rotate(f.angle, [f.pivotX, f.pivotY, f.pivotZ], AXES[f.axis]);
       if (f.dx || f.dy || f.dz) shape = shape.translate([f.dx, f.dy, f.dz]);
       bodies.set(t.id, { shape, names: keepNames(t.shape, shape) });
+      return;
+    }
+
+    case "split": {
+      const t = bodies.target(f.body);
+      if (!t) throw new Error("No body to split");
+      let keep: Shape3D | null, other: Shape3D | null;
+      const sources = [t.shape];
+      if (f.toolBody) {
+        const tool = bodies.map.get(f.toolBody);
+        if (!tool) throw new Error("The tool body no longer exists");
+        if (f.toolBody === t.id) throw new Error("A body can't split itself: pick another body as the tool");
+        keep = cutShapes(t.shape.shape, [tool.shape]);
+        other = commonShapes(t.shape.shape, [tool.shape]);
+        sources.push(tool);
+        if (!hasSolid(other)) throw new Error("The bodies don't overlap");
+        if (!hasSolid(keep)) throw new Error("The tool body contains the whole body");
+      } else {
+        const { point, n } = refPlane(f, bodies, planes);
+        ({ above: keep, below: other } = splitByPlane(t.shape.shape, point, n));
+        if (!keep || !other) throw new Error("The plane doesn't cross the body");
+      }
+      const named = (shape: Shape3D) => ({ shape, names: transferNames(shape, sources, () => `${f.id}:cut`) });
+      // The new body's faces get their own names ("<split id>:<original name>"), so the two pieces never share one.
+      const piece = named(other);
+      for (const [h, n] of piece.names) piece.names.set(h, n.startsWith(`${f.id}:cut`) ? n.replace(`${f.id}:cut`, `${f.id}:cut2`) : `${f.id}:${n}`);
+      bodies.set(f.id, piece);
+      bodies.set(t.id, named(keep));
+      return;
+    }
+
+    case "splitface": {
+      const { feature: s, frame } = sketchOf(f.sketchId);
+      const edges = sketchEdges(s, frame);
+      if (!edges.length) throw new Error("The sketch has no curves to split faces with");
+      let changed = 0;
+      for (const [id, b] of [...bodies.map]) {
+        const solids = splitShape(b.shape, edges).solids as unknown as Shape3D[];
+        if (solids.length !== b.shape.solids.length) continue;
+        const shape = oneShape(solids);
+        if (shape.faces.length === b.shape.faces.length) continue;
+        // The pieces of a split face share its name, with #1, #2… by position.
+        bodies.map.set(id, { shape, names: transferNames(shape, [b], () => `${f.id}:face`) });
+        changed++;
+      }
+      if (!changed) throw new Error("The sketch's curves don't lie on any face of the model");
+      return;
+    }
+
+    case "faceoffset": {
+      if (!f.faces.length) throw new Error("Select the faces to offset");
+      if (f.distance === 0) throw new Error("Distance cannot be 0");
+      const owner = bodies.withFace(f.faces[0]);
+      const samples = faceSamples(owner.shape.shape);
+      const faces = f.faces.map((name) => ({ name, face: faceByName(owner.shape, name) }));
+      const tools = faces.map((x) => {
+        const s = samples.get(x.face.hashCode);
+        if (!s) throw new Error("Can't evaluate a selected face");
+        return thickenFace(x.face, f.distance, s.p, s.n);
+      });
+      const raw = f.distance > 0 ? fuseShapes(owner.shape.shape, tools) : cutShapes(owner.shape.shape, tools);
+      const shape = ensureValid(raw, `Can't offset these faces by ${f.distance} mm`);
+      // An offset face keeps its name: it lies `distance` away from the original along its normal.
+      const names = transferNames(shape, [owner.shape], (_face, sample) => {
+        const back: Vec3 = [sample.p[0] - sample.n[0] * f.distance, sample.p[1] - sample.n[1] * f.distance, sample.p[2] - sample.n[2] * f.distance];
+        return faces.find((x) => onFace(back, x.face))?.name ?? `${f.id}:side`;
+      });
+      bodies.set(owner.id, { shape, names });
+      return;
+    }
+
+    case "replaceface": {
+      if (!f.faces.length) throw new Error("Select the faces to replace");
+      if (f.face && f.faces.includes(f.face)) throw new Error("The target face is one of the faces to replace");
+      const owner = bodies.withFace(f.faces[0]);
+      const { point: q, n: m0 } = refPlane(f, bodies, planes);
+      let current = owner.shape;
+      const [lo, hi] = current.shape.boundingBox.bounds;
+      const centre: Vec3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+      // Longer than anything in the model: prisms and half-spaces must reach past the target.
+      const size = 4 * (Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) + Math.abs(dot3([centre[0] - q[0], centre[1] - q[1], centre[2] - q[2]], m0))) + 10;
+      for (const name of f.faces) {
+        const face = faceByName(current, name);
+        const sample = faceSamples(current.shape).get(face.hashCode);
+        if (!sample) throw new Error("Can't evaluate a selected face");
+        const n = sample.n;
+        const d = dot3(m0, n);
+        if (Math.abs(d) < 0.05) throw new Error("The target is (almost) perpendicular to a selected face");
+        const m: Vec3 = d > 0 ? m0 : [-m0[0], -m0[1], -m0[2]];
+        // Fill up to the target where the face is behind it, remove what's beyond it.
+        const behind = halfSpace(q, m, size, -1), beyond = halfSpace(q, m, size, 1);
+        const out = prism(face, n, size), inward = prism(face, n, -size);
+        const add = commonShapes(out, [behind]);
+        const remove = [commonShapes(out, [beyond]), commonShapes(inward, [beyond])].filter(hasSolid);
+        let shape = current.shape;
+        if (hasSolid(add)) shape = fuseShapes(shape, [add]);
+        if (remove.length) shape = cutShapes(shape, remove);
+        shape = ensureValid(shape, "Can't replace the face with this target");
+        if (!hasSolid(shape)) throw new Error("Nothing would be left of the body");
+        // The face on the target keeps the replaced face's name.
+        const names = transferNames(shape, [current], (_face, s) =>
+          Math.abs(dot3([s.p[0] - q[0], s.p[1] - q[1], s.p[2] - q[2]], m0)) < 1e-3 && Math.abs(dot3(s.n, m0)) > 0.999 ? name : `${f.id}:side`,
+        );
+        current = { shape, names };
+      }
+      bodies.set(owner.id, current);
+      return;
+    }
+
+    case "align": {
+      if (!f.bodies.length) throw new Error("Select the bodies to align");
+      if (f.x === "none" && f.y === "none" && f.z === "none") throw new Error("Choose at least one axis to align on");
+      let ref: [Vec3, Vec3] = [
+        [0, 0, 0],
+        [0, 0, 0],
+      ];
+      if (f.reference) {
+        const r = bodies.map.get(f.reference);
+        if (!r) throw new Error("The reference body no longer exists");
+        ref = r.shape.boundingBox.bounds as [Vec3, Vec3];
+      }
+      const at = (lo: number[], hi: number[], k: number, mode: string) => (mode === "min" ? lo[k] : mode === "max" ? hi[k] : (lo[k] + hi[k]) / 2);
+      const moving = f.bodies.filter((id) => id !== f.reference);
+      const missing = moving.filter((id) => !bodies.map.has(id));
+      if (missing.length === moving.length) throw new Error(moving.length ? "The bodies to align no longer exist" : "Pick bodies other than the reference");
+      for (const id of moving) {
+        const b = bodies.map.get(id);
+        if (!b) continue;
+        const [lo, hi] = b.shape.boundingBox.bounds;
+        const delta = (["x", "y", "z"] as const).map((a, k) => (f[a] === "none" ? 0 : at(ref[0], ref[1], k, f[a]) - at(lo, hi, k, f[a]))) as Vec3;
+        if (delta.every((v) => Math.abs(v) < 1e-9)) continue;
+        const shape = b.shape.clone().translate(delta);
+        bodies.set(id, { shape, names: keepNames(b, shape) });
+      }
+      return missing.length ? `${missing.length} of ${moving.length} bodies no longer exist` : undefined;
+    }
+
+    case "symmetry": {
+      const t = bodies.target(f.body);
+      if (!t) throw new Error("No body to make symmetric");
+      const { point, n } = refPlane(f, bodies, planes);
+      const { above, below } = splitByPlane(t.shape.shape, point, n);
+      const half = f.flip ? below : above;
+      if (!half) throw new Error(`No part of the body is ${f.flip ? "behind" : "in front of"} the plane: flip the side`);
+      const named = { shape: half, names: transferNames(half, [t.shape], () => `${f.id}:cut`) };
+      const copy = half.clone().mirror(n, point);
+      bodies.set(t.id, joinCopies(named, [copy], f.id));
       return;
     }
 

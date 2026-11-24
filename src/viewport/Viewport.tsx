@@ -617,7 +617,10 @@ export function Viewport(props: Props) {
           tmp.set(...ov.anchor).project(camera);
           const visible = tmp.z < 1;
           div.style.display = visible ? "block" : "none";
-          div.style.transform = `translate(${((tmp.x + 1) / 2) * el.clientWidth}px, ${((1 - tmp.y) / 2) * el.clientHeight}px)`;
+          // Kept inside the view (the menu sits 28 × 24 px off its anchor).
+          const x = Math.max(0, Math.min(((tmp.x + 1) / 2) * el.clientWidth, el.clientWidth - div.offsetWidth - 36));
+          const y = Math.max(0, Math.min(((1 - tmp.y) / 2) * el.clientHeight, el.clientHeight - div.offsetHeight - 32));
+          div.style.transform = `translate(${x}px, ${y}px)`;
         } else div.style.display = "none";
       }
       renderer.render(scene, camera);
