@@ -4,6 +4,35 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OpenShape</title>
+    <script>
+      // Hosts without COOP/COEP headers (GitHub Pages): a service worker adds
+      // them, so the kernel can use its multi-threaded build. It takes effect
+      // after one automatic reload; if isolation still fails, the app runs
+      // single-threaded. Nothing happens where the server sends the headers.
+      (function () {
+        var KEY = "openshape-coi-reload";
+        var session = {
+          get: function () { try { return sessionStorage.getItem(KEY); } catch (e) { return "1"; } },
+          set: function () { try { sessionStorage.setItem(KEY, "1"); } catch (e) {} },
+          clear: function () { try { sessionStorage.removeItem(KEY); } catch (e) {} },
+        };
+        if (window.crossOriginIsolated) return session.clear();
+        if (!window.isSecureContext || !("serviceWorker" in navigator)) return;
+        // Reload once to get the headers; never loop if the browser refuses isolation.
+        var reload = function () {
+          if (session.get()) return;
+          session.set();
+          location.reload();
+        };
+        navigator.serviceWorker.register(new URL("coi-sw.js", document.baseURI)).then(
+          function (reg) {
+            if (navigator.serviceWorker.controller || reg.active) reload();
+            else navigator.serviceWorker.addEventListener("controllerchange", reload);
+          },
+          function () {},
+        );
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

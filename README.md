@@ -3,6 +3,8 @@
 Modellatore CAD parametrico open source, per il browser.
 Gira nel browser; in futuro impacchettabile desktop con Tauri.
 
+**Prova online:** https://inedia.github.io/OpenShape/
+
 > OpenShape è scritto da zero a partire dal comportamento osservabile di un CAD.
 > Nessun codice o algoritmo proviene da prodotti proprietari.
 
